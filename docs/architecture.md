@@ -57,7 +57,7 @@ Adapters：
 内部真实 seam，用于从 manifest 安全构建 source bundle。
 
 ```python
-load_bundle(submission: SubmissionRef, policy: SourcePolicy) -> SourceBundle
+load_bundle(submission: Submission, policy: SourcePolicy) -> SourceBundle
 ```
 
 Adapters：

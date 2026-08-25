@@ -1,8 +1,10 @@
 import errno
 import os
+import re
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID
@@ -16,6 +18,11 @@ class UnsafeSubmissionPath(ValueError):
 
 class SubmissionFileError(RuntimeError):
     """A declared submission file is missing or unreadable."""
+
+
+class OmissionReason(StrEnum):
+    FILE_BUDGET = "file_budget"
+    TOTAL_BUDGET = "total_budget"
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,8 +63,11 @@ class SourceFile:
     declared_sha256: str | None
     content: str
     bytes_read: int
-    truncated: bool
-    omission_reason: str | None
+    omission_reason: OmissionReason | None
+
+    @property
+    def truncated(self) -> bool:
+        return self.omission_reason is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,11 +117,10 @@ class NfsSubmissionStore:
                 raise UnsafeSubmissionPath(f"invalid declared sha256 for {path!r}")
             entries.append((path, parts, declared_bytes, declared_sha256))
 
-        input_root = self._oj_root / "submissions" / submission.id / "input"
         source_files = []
         total_bytes_read = 0
         for path, parts, declared_bytes, declared_sha256 in sorted(entries):
-            if not _is_source_path(path, policy):
+            if not _is_source_path(path, policy, submission.lab_definition):
                 continue
             remaining = policy.max_total_bytes - total_bytes_read
             if remaining <= 0:
@@ -122,17 +131,20 @@ class NfsSubmissionStore:
                         declared_sha256=declared_sha256,
                         content="",
                         bytes_read=0,
-                        truncated=True,
-                        omission_reason="total_budget",
+                        omission_reason=OmissionReason.TOTAL_BUDGET,
                     )
                 )
                 continue
             read_limit = min(policy.max_file_bytes, remaining)
-            data, truncated = _read_file_beneath(input_root, parts, read_limit)
+            data, truncated = _read_file_beneath(
+                self._oj_root, submission.id, parts, read_limit
+            )
             omission_reason = None
             if truncated:
                 omission_reason = (
-                    "file_budget" if policy.max_file_bytes <= remaining else "total_budget"
+                    OmissionReason.FILE_BUDGET
+                    if policy.max_file_bytes <= remaining
+                    else OmissionReason.TOTAL_BUDGET
                 )
             source_files.append(
                 SourceFile(
@@ -141,7 +153,6 @@ class NfsSubmissionStore:
                     declared_sha256=declared_sha256,
                     content=data.decode("utf-8", "replace"),
                     bytes_read=len(data),
-                    truncated=truncated,
                     omission_reason=omission_reason,
                 )
             )
@@ -168,14 +179,73 @@ def _safe_path_parts(path: str) -> tuple[str, ...]:
     return parts
 
 
-def _is_source_path(path: str, policy: SourcePolicy) -> bool:
+def _is_source_path(
+    path: str, policy: SourcePolicy, lab_definition: Mapping[str, object]
+) -> bool:
     name = path.rsplit("/", 1)[-1]
     suffix = Path(name).suffix.lower()
-    return name in policy.source_names or suffix in policy.source_suffixes
+    if name in policy.source_names or suffix in policy.source_suffixes:
+        return True
+    return any(
+        _matches_lab_pattern(path, pattern)
+        for pattern in _lab_file_patterns(lab_definition)
+    )
+
+
+def _lab_file_patterns(lab_definition: Mapping[str, object]) -> tuple[str, ...]:
+    spec = lab_definition.get("spec")
+    if not isinstance(spec, Mapping):
+        return ()
+    submissions = spec.get("submissions")
+    if not isinstance(submissions, Mapping):
+        return ()
+    home = submissions.get("home")
+    if not isinstance(home, Mapping):
+        return ()
+
+    patterns: list[str] = []
+    for key in ("required", "allow"):
+        values = home.get(key)
+        if not isinstance(values, list):
+            continue
+        patterns.extend(value for value in values if isinstance(value, str))
+    return tuple(patterns)
+
+
+def _matches_lab_pattern(path: str, pattern: str) -> bool:
+    if (
+        not pattern
+        or pattern.startswith("/")
+        or "\\" in pattern
+        or "\x00" in pattern
+        or any(part in {"", ".", ".."} for part in pattern.split("/"))
+    ):
+        return False
+
+    expression = []
+    index = 0
+    while index < len(pattern):
+        character = pattern[index]
+        if character == "*" and index + 1 < len(pattern) and pattern[index + 1] == "*":
+            expression.append(".*")
+            index += 2
+        elif character == "*":
+            expression.append("[^/]*")
+            index += 1
+        elif character == "?":
+            expression.append("[^/]")
+            index += 1
+        else:
+            expression.append(re.escape(character))
+            index += 1
+    return re.fullmatch("".join(expression), path) is not None
 
 
 def _read_file_beneath(
-    input_root: Path, parts: tuple[str, ...], read_limit: int
+    oj_root: Path,
+    submission_id: str,
+    parts: tuple[str, ...],
+    read_limit: int,
 ) -> tuple[bytes, bool]:
     if not hasattr(os, "O_NOFOLLOW"):
         raise RuntimeError("secure submission reads require O_NOFOLLOW")
@@ -185,8 +255,9 @@ def _read_file_beneath(
     directory_fds: list[int] = []
     file_fd: int | None = None
     try:
-        directory_fds.append(os.open(input_root, directory_flags))
-        for part in parts[:-1]:
+        directory_fds.append(os.open(oj_root, directory_flags))
+        directory_parts = ("submissions", submission_id, "input", *parts[:-1])
+        for part in directory_parts:
             directory_fds.append(os.open(part, directory_flags, dir_fd=directory_fds[-1]))
         file_fd = os.open(parts[-1], file_flags, dir_fd=directory_fds[-1])
         if not stat.S_ISREG(os.fstat(file_fd).st_mode):

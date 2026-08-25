@@ -45,6 +45,38 @@ def test_load_bundle_rejects_symlink_escape(tmp_path, escape_kind: str) -> None:
         NfsSubmissionStore(tmp_path).load_bundle(submission, SourcePolicy())
 
 
+@pytest.mark.parametrize("symlink_level", ["submissions", "submission", "input"])
+def test_load_bundle_rejects_symlinks_in_submission_root_chain(
+    tmp_path, symlink_level: str
+) -> None:
+    submission = make_submission([{"path": "student/kernel.cpp", "size": 4}])
+    oj_root = tmp_path / "oj"
+    oj_root.mkdir()
+    outside = tmp_path / "outside"
+
+    if symlink_level == "submissions":
+        target_input = outside / submission.id / "input"
+        (oj_root / "submissions").symlink_to(outside, target_is_directory=True)
+    elif symlink_level == "submission":
+        (oj_root / "submissions").mkdir()
+        target_input = outside / "input"
+        (oj_root / "submissions" / submission.id).symlink_to(
+            outside, target_is_directory=True
+        )
+    else:
+        (oj_root / "submissions" / submission.id).mkdir(parents=True)
+        target_input = outside
+        (oj_root / "submissions" / submission.id / "input").symlink_to(
+            outside, target_is_directory=True
+        )
+
+    (target_input / "student").mkdir(parents=True)
+    (target_input / "student" / "kernel.cpp").write_text("code")
+
+    with pytest.raises(UnsafeSubmissionPath):
+        NfsSubmissionStore(oj_root).load_bundle(submission, SourcePolicy())
+
+
 def test_load_bundle_keeps_multifile_metadata_when_content_budget_is_exhausted(tmp_path) -> None:
     files = [
         {"path": "CMakeLists.txt", "size": 4},
@@ -80,6 +112,42 @@ def test_load_bundle_keeps_multifile_metadata_when_content_budget_is_exhausted(t
     assert bundle.files[3].omission_reason == "total_budget"
 
 
+def test_load_bundle_uses_frozen_lab_file_rules(tmp_path) -> None:
+    files = [
+        {"path": ".env", "size": 9},
+        {"path": "datasets/calibration.jsonl", "size": 5},
+        {"path": "student/entry.custom", "size": 5},
+        {"path": "assets/blob.bin", "size": 4},
+    ]
+    lab_definition = {
+        "spec": {
+            "submissions": {
+                "home": {
+                    "allow": [".env", "datasets/*.jsonl", "src/**"],
+                    "required": ["student/*"],
+                }
+            }
+        }
+    }
+    submission = make_submission(files, lab_definition=lab_definition)
+    input_root = tmp_path / "submissions" / submission.id / "input"
+    (input_root / "datasets").mkdir(parents=True)
+    (input_root / "student").mkdir()
+    (input_root / "assets").mkdir()
+    (input_root / ".env").write_text("TOKEN=abc")
+    (input_root / "datasets" / "calibration.jsonl").write_text("data\n")
+    (input_root / "student" / "entry.custom").write_text("entry")
+    (input_root / "assets" / "blob.bin").write_bytes(b"blob")
+
+    bundle = NfsSubmissionStore(tmp_path).load_bundle(submission, SourcePolicy())
+
+    assert [file.path for file in bundle.files] == [
+        ".env",
+        "datasets/calibration.jsonl",
+        "student/entry.custom",
+    ]
+
+
 def test_load_bundle_rejects_non_regular_files(tmp_path) -> None:
     submission = make_submission([{"path": "student/kernel.cpp", "size": 0}])
     input_root = tmp_path / "submissions" / submission.id / "input" / "student"
@@ -90,7 +158,11 @@ def test_load_bundle_rejects_non_regular_files(tmp_path) -> None:
         NfsSubmissionStore(tmp_path).load_bundle(submission, SourcePolicy())
 
 
-def make_submission(files: list[dict[str, object]]) -> Submission:
+def make_submission(
+    files: list[dict[str, object]],
+    *,
+    lab_definition: dict[str, object] | None = None,
+) -> Submission:
     return Submission(
         id="11111111-1111-4111-8111-111111111111",
         owner="alice",
@@ -99,5 +171,5 @@ def make_submission(files: list[dict[str, object]]) -> Submission:
         input_digest="digest",
         submitted_at=datetime(2026, 8, 25, tzinfo=UTC),
         input_manifest={"files": files},
-        lab_definition={},
+        lab_definition=lab_definition or {},
     )
