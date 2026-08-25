@@ -158,5 +158,5 @@ def _add_plan_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--min-score", type=int, default=60)
     parser.add_argument("--lab")
     parser.add_argument("--owner")
-    parser.add_argument("--limit", type=int)
+    parser.add_argument("--limit", type=int, help="limit single-review tasks only")
     parser.add_argument("--output-root")

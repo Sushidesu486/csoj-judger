@@ -21,14 +21,22 @@ class FileReportStore:
         run_dir.mkdir(parents=True, exist_ok=True)
         target = run_dir / "manifest.json"
         temporary = run_dir / f".manifest.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        payload = (
+            json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        ).encode()
 
         try:
-            with temporary.open("x", encoding="utf-8") as file:
-                json.dump(manifest.to_dict(), file, ensure_ascii=False, indent=2, sort_keys=True)
-                file.write("\n")
+            with temporary.open("xb") as file:
+                file.write(payload)
                 file.flush()
                 os.fsync(file.fileno())
-            os.replace(temporary, target)
+            try:
+                os.link(temporary, target)
+            except FileExistsError:
+                if target.read_bytes() != payload:
+                    raise FileExistsError(
+                        f"run_id {manifest.run_id!r} already has a different manifest"
+                    ) from None
         finally:
             temporary.unlink(missing_ok=True)
 

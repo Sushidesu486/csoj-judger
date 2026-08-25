@@ -1,6 +1,8 @@
+import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,18 @@ class Submission:
     status: str = "Success"
     is_valid: bool = True
 
+    def to_manifest_entry(self, lab_definition_key: str) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "owner": self.owner,
+            "lab_id": self.lab_id,
+            "score": self.score,
+            "input_digest": self.input_digest,
+            "submitted_at": self.submitted_at.isoformat(),
+            "input_manifest": dict(self.input_manifest),
+            "lab_definition_key": lab_definition_key,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class SnapshotRequest:
@@ -42,6 +56,7 @@ class SnapshotRequest:
     def __post_init__(self) -> None:
         if self.cutoff.tzinfo is None or self.cutoff.utcoffset() is None:
             raise ValueError("snapshot cutoff must be timezone-aware")
+        object.__setattr__(self, "cutoff", self.cutoff.astimezone(UTC))
         if self.limit is not None and self.limit <= 0:
             raise ValueError("snapshot limit must be positive")
 
@@ -61,12 +76,20 @@ class AuditRequest:
     labs: tuple[str, ...] = field(default_factory=tuple)
     owners: tuple[str, ...] = field(default_factory=tuple)
     limit: int | None = None
+    rules_version: str = "audit-rules-v1"
+    prompt_version: str | None = None
+    model: str | None = None
+    similarity_threshold: float | None = None
+    completion_count: int = 1
 
     def __post_init__(self) -> None:
         if self.cutoff.tzinfo is None or self.cutoff.utcoffset() is None:
             raise ValueError("audit cutoff must be timezone-aware")
+        object.__setattr__(self, "cutoff", self.cutoff.astimezone(UTC))
         if self.limit is not None and self.limit <= 0:
             raise ValueError("audit limit must be positive")
+        if self.completion_count <= 0:
+            raise ValueError("completion_count must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,9 +120,23 @@ class RunManifest:
     min_score: int
     labs: tuple[str, ...]
     owners: tuple[str, ...]
+    rules_version: str
+    prompt_version: str | None
+    model: str | None
+    similarity_threshold: float | None
+    completion_count: int
     single_review_corpus_size: int
     plagiarism_corpus_size: int
+    submissions: tuple[Submission, ...]
     tasks: tuple[AuditTask, ...]
+
+    def __post_init__(self) -> None:
+        if self.generated_at.tzinfo is None or self.generated_at.utcoffset() is None:
+            raise ValueError("generated_at must be timezone-aware")
+        if self.cutoff.tzinfo is None or self.cutoff.utcoffset() is None:
+            raise ValueError("manifest cutoff must be timezone-aware")
+        object.__setattr__(self, "generated_at", self.generated_at.astimezone(UTC))
+        object.__setattr__(self, "cutoff", self.cutoff.astimezone(UTC))
 
     @property
     def task_counts(self) -> dict[AuditTaskKind, int]:
@@ -109,6 +146,13 @@ class RunManifest:
         return counts
 
     def to_dict(self) -> dict[str, Any]:
+        lab_definitions: dict[str, Mapping[str, Any]] = {}
+        submissions = []
+        for submission in self.submissions:
+            lab_definition_key = _json_fingerprint(submission.lab_definition)
+            lab_definitions[lab_definition_key] = submission.lab_definition
+            submissions.append(submission.to_manifest_entry(lab_definition_key))
+
         return {
             "schema_version": self.schema_version,
             "run_id": self.run_id,
@@ -118,9 +162,16 @@ class RunManifest:
             "min_score": self.min_score,
             "labs": list(self.labs),
             "owners": list(self.owners),
+            "rules_version": self.rules_version,
+            "prompt_version": self.prompt_version,
+            "model": self.model,
+            "similarity_threshold": self.similarity_threshold,
+            "completion_count": self.completion_count,
             "single_review_corpus_size": self.single_review_corpus_size,
             "plagiarism_corpus_size": self.plagiarism_corpus_size,
             "task_counts": {kind.value: count for kind, count in self.task_counts.items()},
+            "lab_definitions": lab_definitions,
+            "submissions": submissions,
             "tasks": [task.to_dict() for task in self.tasks],
         }
 
@@ -133,3 +184,8 @@ class RunSummary:
     @property
     def task_counts(self) -> dict[AuditTaskKind, int]:
         return self.manifest.task_counts
+
+
+def _json_fingerprint(value: Mapping[str, Any]) -> str:
+    canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()

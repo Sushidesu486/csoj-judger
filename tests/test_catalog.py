@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 from oj_checker.catalog import InMemorySubmissionCatalog
 from oj_checker.domain import SelectionPolicy, SnapshotRequest, Submission
@@ -35,6 +35,21 @@ def test_snapshot_keeps_history_only_for_plagiarism_corpus() -> None:
         "alice-lab3",
         "bob-lab2",
     ]
+
+
+def test_snapshot_normalizes_cutoff_to_utc() -> None:
+    catalog = InMemorySubmissionCatalog([])
+    china_standard_time = timezone(timedelta(hours=8))
+
+    snapshot = catalog.snapshot(
+        SnapshotRequest(
+            SelectionPolicy.ALL_QUALIFYING,
+            cutoff=datetime(2026, 8, 25, 10, 30, tzinfo=china_standard_time),
+        )
+    )
+
+    assert snapshot.cutoff.tzinfo is UTC
+    assert snapshot.cutoff.isoformat() == "2026-08-25T02:30:00+00:00"
 
 
 def submission(

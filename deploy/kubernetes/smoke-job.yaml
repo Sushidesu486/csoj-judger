@@ -45,7 +45,7 @@ spec:
             - install
             - --user
             - --disable-pip-version-check
-            - psycopg[binary]>=3.2.9,<4
+            - psycopg[binary]==3.3.4
           env:
             - name: HOME
               value: /tmp

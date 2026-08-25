@@ -3,6 +3,7 @@ import json
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from datetime import datetime
+from itertools import combinations
 
 from oj_checker.catalog import SubmissionCatalog, best_per_owner_lab
 from oj_checker.domain import (
@@ -46,7 +47,6 @@ class AuditRunner:
         plagiarism_submissions = plagiarism.submissions
         single_review_submissions = best_per_owner_lab(plagiarism_submissions)
         if request.limit is not None:
-            plagiarism_submissions = plagiarism_submissions[: request.limit]
             single_review_submissions = single_review_submissions[: request.limit]
 
         tasks = [self._single_review_task(item) for item in single_review_submissions]
@@ -62,8 +62,14 @@ class AuditRunner:
             min_score=request.min_score,
             labs=request.labs,
             owners=request.owners,
+            rules_version=request.rules_version,
+            prompt_version=request.prompt_version,
+            model=request.model,
+            similarity_threshold=request.similarity_threshold,
+            completion_count=request.completion_count,
             single_review_corpus_size=len(single_review_submissions),
             plagiarism_corpus_size=len(plagiarism_submissions),
+            submissions=plagiarism_submissions,
             tasks=tuple(tasks),
         )
         return RunSummary(manifest, self._report_store.write_manifest(manifest))
@@ -94,24 +100,31 @@ class AuditRunner:
 
         tasks = []
         for (lab_id, digest), members in groups.items():
-            if len({member.owner for member in members}) < 2:
+            representatives: dict[str, Submission] = {}
+            for member in sorted(members, key=lambda item: (item.submitted_at, item.id)):
+                representatives.setdefault(member.owner, member)
+            if len(representatives) < 2:
                 continue
-            submission_ids = tuple(sorted(member.id for member in members))
-            payload = {
-                "kind": AuditTaskKind.EXACT_DUPLICATE.value,
-                "lab_id": lab_id,
-                "input_digest": digest,
-                "submission_ids": submission_ids,
-            }
-            tasks.append(
-                AuditTask(
-                    key=cls._task_key(payload),
-                    kind=AuditTaskKind.EXACT_DUPLICATE,
-                    lab_id=lab_id,
-                    submission_ids=submission_ids,
-                    input_digest=digest,
+
+            ordered = sorted(representatives.values(), key=lambda item: item.owner)
+            for first, second in combinations(ordered, 2):
+                pair = sorted((first, second), key=lambda item: (item.submitted_at, item.id))
+                submission_ids = (pair[0].id, pair[1].id)
+                payload = {
+                    "kind": AuditTaskKind.EXACT_DUPLICATE.value,
+                    "lab_id": lab_id,
+                    "input_digest": digest,
+                    "submission_ids": submission_ids,
+                }
+                tasks.append(
+                    AuditTask(
+                        key=cls._task_key(payload),
+                        kind=AuditTaskKind.EXACT_DUPLICATE,
+                        lab_id=lab_id,
+                        submission_ids=submission_ids,
+                        input_digest=digest,
+                    )
                 )
-            )
         return tasks
 
     @staticmethod

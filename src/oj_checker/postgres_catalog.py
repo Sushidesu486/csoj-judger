@@ -5,6 +5,7 @@ import psycopg
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
 
+from oj_checker.catalog import best_per_owner_lab
 from oj_checker.domain import SelectionPolicy, SnapshotRequest, Submission, SubmissionSnapshot
 
 _READ_ONLY_OPTIONS = " ".join(
@@ -40,6 +41,10 @@ class PostgresSubmissionCatalog:
                 rows = connection.execute(*self._query(request)).fetchall()
 
         submissions = tuple(self._submission_from_row(row) for row in rows)
+        if request.policy is SelectionPolicy.BEST_PER_OWNER_LAB:
+            submissions = best_per_owner_lab(submissions)
+            if request.limit is not None:
+                submissions = submissions[: request.limit]
         return SubmissionSnapshot(request.policy, request.cutoff, submissions)
 
     @staticmethod
@@ -72,35 +77,15 @@ class PostgresSubmissionCatalog:
         """
         join = "LEFT JOIN oj_submission_runs r ON r.id = s.active_result_run_id"
 
-        if request.policy is SelectionPolicy.BEST_PER_OWNER_LAB:
-            query = f"""
-                WITH selected AS (
-                    SELECT DISTINCT ON (s.owner, s.lab_id)
-                        {columns}
-                    FROM oj_submissions s
-                    {join}
-                    WHERE {where_clause}
-                    ORDER BY
-                        s.owner,
-                        s.lab_id,
-                        s.score DESC,
-                        s.submitted_at DESC,
-                        s.id DESC
-                )
-                SELECT *
-                FROM selected
-                ORDER BY owner, lab_id, submitted_at, id
-            """
-        else:
-            query = f"""
-                SELECT {columns}
-                FROM oj_submissions s
-                {join}
-                WHERE {where_clause}
-                ORDER BY s.owner, s.lab_id, s.submitted_at, s.id
-            """
+        query = f"""
+            SELECT {columns}
+            FROM oj_submissions s
+            {join}
+            WHERE {where_clause}
+            ORDER BY s.owner, s.lab_id, s.submitted_at, s.id
+        """
 
-        if request.limit is not None:
+        if request.limit is not None and request.policy is SelectionPolicy.ALL_QUALIFYING:
             query += " LIMIT %s"
             parameters.append(request.limit)
 
