@@ -26,8 +26,11 @@ OJ Arbiter 是 HPC101 OJ 的只读合规审查器。它从 plat101 PostgreSQL �
 ```bash
 make check
 make zipapp
+make container-smoke
 scripts/deploy-smoke.sh
 ```
 
 `deploy-smoke.sh` 会更新开发 ConfigMap、重建 `oj-checker-smoke` Job、等待完成并输出日志。该 Job 不读取 LLM Secret，也不调用 glm。
 脚本仅接受干净工作树，并把真实 Git commit SHA 写入本次 manifest。
+
+`make container-smoke` 使用 `uv.lock` 构建面向集群 `linux/amd64` 的生产镜像，并以只读根文件系统和 UID 65532 验证 CLI、项目包及 PostgreSQL 驱动可用。可通过 `IMAGE=...`、`PLATFORM=...` 覆盖本地构建参数。
