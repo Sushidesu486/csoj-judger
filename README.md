@@ -17,6 +17,7 @@ OJ Arbiter 是 HPC101 OJ 的只读合规审查器。它从 plat101 PostgreSQL �
 - 本地 Git 仓库已初始化。
 - 已实现第一条垂直切片：只读 DB 快照、双语料集任务规划、exact-digest 跨学生分组和原子 manifest 写入。
 - Manifest 冻结 submission metadata 与 lab snapshot；相同 `run_id` 不允许覆盖不同内容。
+- `SubmissionStore.load_bundle` 已实现安全相对路径、symlink 防护、普通文件校验和多文件读取预算。
 - 已提供不调用 LLM 的 `doctor`、`plan`、`smoke` 命令和固定到 m601 的 smoke Job。
 - 现有 `oj-audit-db` Secret 使用的数据库角色实际具备写权限。开发测试必须强制只读会话，生产部署必须迁移到专用只读角色。
 

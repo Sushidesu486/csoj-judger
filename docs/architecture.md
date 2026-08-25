@@ -108,6 +108,8 @@ prompt 构造、schema 校验、重试与速率限制都留在 module implementa
 
 相似指纹使用 delta token；LLM 裁决使用 delta 加有限上下文。这样既降低公共 baseline 噪声，也不会把“文件被修改”误称为“文件内容全是学生改动”。
 
+NFS adapter 不使用字符串拼接后直接 `open()`：submission ID 必须是规范 UUID，manifest path 必须是无空段、`.`、`..`、反斜杠或 NUL 的相对 POSIX 路径；根目录、中间目录和最终文件逐级使用 `openat` + `O_NOFOLLOW`，并只接受普通文件。所有相关文件保留元数据，内容超过预算时显式标记截断原因。
+
 ## Indexed Job 执行模型
 
 一个 CronJob 创建一个 `completionMode: Indexed` Job，建议初始 `completions: 4`、`parallelism: 4`：

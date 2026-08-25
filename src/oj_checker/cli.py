@@ -13,6 +13,7 @@ from oj_checker.domain import AuditRequest, SelectionPolicy, SnapshotRequest
 from oj_checker.postgres_catalog import PostgresSubmissionCatalog
 from oj_checker.report_store import FileReportStore
 from oj_checker.runner import AuditRunner
+from oj_checker.submission_store import NfsSubmissionStore, SourcePolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,11 +77,21 @@ def _doctor(settings: Settings, *, lab: str | None) -> dict[str, Any]:
 
     nfs_root_readable = settings.oj_root.is_dir() and os.access(settings.oj_root, os.R_OK)
     sample_input_readable = False
+    source_file_count = 0
+    source_bytes_read = 0
+    truncated_source_file_count = 0
     if best_submissions:
         sample_input = settings.oj_root / "submissions" / best_submissions[0].id / "input"
         sample_input_readable = sample_input.is_dir() and os.access(sample_input, os.R_OK)
+        bundle = NfsSubmissionStore(settings.oj_root).load_bundle(
+            best_submissions[0],
+            SourcePolicy(max_file_bytes=64_000, max_total_bytes=256_000),
+        )
+        source_file_count = len(bundle.files)
+        source_bytes_read = bundle.total_bytes_read
+        truncated_source_file_count = sum(file.truncated for file in bundle.files)
 
-    if not nfs_root_readable or not sample_input_readable:
+    if not nfs_root_readable or not sample_input_readable or source_file_count == 0:
         raise RuntimeError("submission NFS is not readable")
 
     return {
@@ -92,6 +103,9 @@ def _doctor(settings: Settings, *, lab: str | None) -> dict[str, Any]:
         "plagiarism_corpus_size": len(all_qualifying.submissions),
         "nfs_root_readable": nfs_root_readable,
         "sample_input_readable": sample_input_readable,
+        "source_file_count": source_file_count,
+        "source_bytes_read": source_bytes_read,
+        "truncated_source_file_count": truncated_source_file_count,
         "llm_checked": False,
     }
 
