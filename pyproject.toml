@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "oj-arbiter"
+version = "0.1.0"
+description = "Read-only compliance auditor for the HPC101 online judge"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  "psycopg[binary]>=3.2.9,<4",
+]
+
+[project.scripts]
+oj-checker = "oj_checker.cli:entrypoint"
+
+[dependency-groups]
+dev = [
+  "mypy>=1.17,<2",
+  "pytest>=8.4,<9",
+  "ruff>=0.12,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/oj_checker"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+packages = ["oj_checker"]

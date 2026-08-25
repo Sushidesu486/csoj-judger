@@ -1,0 +1,144 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: oj-checker-smoke
+  namespace: csoj-judger
+  labels:
+    app.kubernetes.io/name: oj-checker
+    app.kubernetes.io/component: smoke-test
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oj-checker
+        app.kubernetes.io/component: smoke-test
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - m601.clusters.zjusct.io
+      initContainers:
+        - name: install-dependencies
+          image: harbor.clusters.zjusct.io/public/devbox:4
+          command:
+            - python3
+            - -m
+            - pip
+          args:
+            - install
+            - --user
+            - --disable-pip-version-check
+            - psycopg[binary]>=3.2.9,<4
+          env:
+            - name: HOME
+              value: /tmp
+            - name: PYTHONUSERBASE
+              value: /opt/python-userbase
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: python-userbase
+              mountPath: /opt/python-userbase
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: checker
+          image: harbor.clusters.zjusct.io/public/devbox:4
+          command: ["python3", "/app/oj-checker.pyz"]
+          args:
+            - smoke
+            - --lab
+            - lab4-cpu
+            - --run-id
+            - m601-exact-smoke
+            - --output-root
+            - /work/audit-reports
+          env:
+            - name: HOME
+              value: /tmp
+            - name: PYTHONUSERBASE
+              value: /opt/python-userbase
+            - name: DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: oj-audit-db
+                  key: url
+            - name: PGOPTIONS
+              value: >-
+                -c default_transaction_read_only=on
+                -c statement_timeout=30000
+                -c lock_timeout=1000
+                -c idle_in_transaction_session_timeout=30000
+                -c application_name=oj-checker-smoke
+            - name: OJ_ROOT
+              value: /data/.oj
+            - name: OJ_CHECKER_GIT_COMMIT
+              value: local-dev
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: checker-code
+              mountPath: /app
+              readOnly: true
+            - name: python-userbase
+              mountPath: /opt/python-userbase
+              readOnly: true
+            - name: submissions
+              mountPath: /data
+              readOnly: true
+            - name: work
+              mountPath: /work
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: checker-code
+          configMap:
+            name: oj-checker-dev-code
+        - name: python-userbase
+          emptyDir: {}
+        - name: submissions
+          nfs:
+            server: root.clusters.zjusct.io
+            path: /tank/hpc101/submissions
+            readOnly: true
+        - name: work
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
