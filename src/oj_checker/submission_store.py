@@ -124,6 +124,7 @@ class NfsSubmissionStore:
                 continue
             remaining = policy.max_total_bytes - total_bytes_read
             if remaining <= 0:
+                _validate_file_beneath(self._oj_root, submission.id, parts)
                 source_files.append(
                     SourceFile(
                         path=path,
@@ -247,6 +248,22 @@ def _read_file_beneath(
     parts: tuple[str, ...],
     read_limit: int,
 ) -> tuple[bytes, bool]:
+    file_fd = _open_regular_file_beneath(oj_root, submission_id, parts)
+    with os.fdopen(file_fd, "rb") as file:
+        data = file.read(read_limit + 1)
+    return data[:read_limit], len(data) > read_limit
+
+
+def _validate_file_beneath(
+    oj_root: Path, submission_id: str, parts: tuple[str, ...]
+) -> None:
+    file_fd = _open_regular_file_beneath(oj_root, submission_id, parts)
+    os.close(file_fd)
+
+
+def _open_regular_file_beneath(
+    oj_root: Path, submission_id: str, parts: tuple[str, ...]
+) -> int:
     if not hasattr(os, "O_NOFOLLOW"):
         raise RuntimeError("secure submission reads require O_NOFOLLOW")
 
@@ -265,6 +282,8 @@ def _read_file_beneath(
             file_fd = None
             raise UnsafeSubmissionPath("declared submission path is not a regular file")
     except OSError as error:
+        if file_fd is not None:
+            os.close(file_fd)
         if error.errno in {errno.ELOOP, errno.ENOTDIR}:
             raise UnsafeSubmissionPath(
                 "submission path contains a symlink or non-directory"
@@ -276,6 +295,4 @@ def _read_file_beneath(
 
     if file_fd is None:
         raise SubmissionFileError("declared submission file could not be opened")
-    with os.fdopen(file_fd, "rb") as file:
-        data = file.read(read_limit + 1)
-    return data[:read_limit], len(data) > read_limit
+    return file_fd

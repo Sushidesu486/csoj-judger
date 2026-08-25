@@ -158,6 +158,27 @@ def test_load_bundle_rejects_non_regular_files(tmp_path) -> None:
         NfsSubmissionStore(tmp_path).load_bundle(submission, SourcePolicy())
 
 
+def test_load_bundle_validates_files_after_total_budget_is_exhausted(tmp_path) -> None:
+    submission = make_submission(
+        [
+            {"path": "a.cpp", "size": 1},
+            {"path": "z.cpp", "size": 4},
+        ]
+    )
+    input_root = tmp_path / "submissions" / submission.id / "input"
+    input_root.mkdir(parents=True)
+    (input_root / "a.cpp").write_text("a")
+    outside = tmp_path / "outside.cpp"
+    outside.write_text("code")
+    (input_root / "z.cpp").symlink_to(outside)
+
+    with pytest.raises(UnsafeSubmissionPath):
+        NfsSubmissionStore(tmp_path).load_bundle(
+            submission,
+            SourcePolicy(max_file_bytes=1, max_total_bytes=1),
+        )
+
+
 def make_submission(
     files: list[dict[str, object]],
     *,
