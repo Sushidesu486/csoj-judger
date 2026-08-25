@@ -49,6 +49,16 @@ def test_run_keeps_non_best_exact_duplicates_in_plagiarism_tasks(tmp_path) -> No
     ]
     assert persisted["submissions"][0]["owner"] == "alice"
     assert persisted["submissions"][0]["input_manifest"] == {"files": []}
+    assert persisted["submissions"][0]["active_run"] == {
+        "id": 123,
+        "state": "Succeeded",
+        "result_info": {"track": "cpu"},
+        "failure_class": None,
+        "failure_reason": None,
+        "score": 70,
+        "performance": 1.25,
+        "finished_at": "2026-08-20T10:05:00+00:00",
+    }
 
 
 def test_exact_duplicate_tasks_are_pairs_between_distinct_owners(tmp_path) -> None:
@@ -113,11 +123,13 @@ def test_single_review_limit_does_not_truncate_plagiarism_corpus(tmp_path) -> No
 
 
 def test_run_id_cannot_overwrite_a_different_manifest(tmp_path) -> None:
+    catalog = InMemorySubmissionCatalog(
+        [submission("alice", "alice", 90, "digest", "2026-08-20T10:00:00Z")]
+    )
+    report_store = FileReportStore(tmp_path)
     runner = AuditRunner(
-        InMemorySubmissionCatalog(
-            [submission("alice", "alice", 90, "digest", "2026-08-20T10:00:00Z")]
-        ),
-        FileReportStore(tmp_path),
+        catalog,
+        report_store,
         clock=lambda: datetime(2026, 8, 25, 2, 30, tzinfo=UTC),
         git_commit="test-commit",
     )
@@ -126,10 +138,17 @@ def test_run_id_cannot_overwrite_a_different_manifest(tmp_path) -> None:
     )
     original = first.manifest_path.read_bytes()
 
-    same = runner.run(
+    retry_runner = AuditRunner(
+        catalog,
+        report_store,
+        clock=lambda: datetime(2026, 8, 25, 2, 31, tzinfo=UTC),
+        git_commit="test-commit",
+    )
+    same = retry_runner.run(
         AuditRequest(run_id="immutable-run", cutoff=datetime(2026, 8, 22, tzinfo=UTC))
     )
     assert same.manifest_path.read_bytes() == original
+    assert same.manifest.generated_at == first.manifest.generated_at
 
     with pytest.raises(FileExistsError, match="different manifest"):
         runner.run(
@@ -137,6 +156,16 @@ def test_run_id_cannot_overwrite_a_different_manifest(tmp_path) -> None:
         )
 
     assert first.manifest_path.read_bytes() == original
+
+
+def test_runner_requires_a_traceable_git_commit(tmp_path) -> None:
+    with pytest.raises(ValueError, match="git_commit"):
+        AuditRunner(
+            InMemorySubmissionCatalog([]),
+            FileReportStore(tmp_path),
+            clock=lambda: datetime(2026, 8, 25, 2, 30, tzinfo=UTC),
+            git_commit="unknown",
+        )
 
 
 def submission(
@@ -155,4 +184,11 @@ def submission(
         submitted_at=datetime.fromisoformat(submitted_at.replace("Z", "+00:00")),
         input_manifest={"files": []},
         lab_definition={},
+        active_run_id=123,
+        run_state="Succeeded",
+        run_result_info={"track": "cpu"},
+        run_score=score,
+        run_performance=1.25,
+        run_finished_at=datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
+        .replace(minute=5),
     )

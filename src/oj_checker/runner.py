@@ -28,6 +28,8 @@ class AuditRunner:
         clock: Callable[[], datetime],
         git_commit: str,
     ) -> None:
+        if git_commit in {"", "unknown", "local-dev", "REQUIRED_AT_DEPLOY_TIME"}:
+            raise ValueError("git_commit must identify the code used for this audit run")
         self._catalog = catalog
         self._report_store = report_store
         self._clock = clock
@@ -72,7 +74,8 @@ class AuditRunner:
             submissions=plagiarism_submissions,
             tasks=tuple(tasks),
         )
-        return RunSummary(manifest, self._report_store.write_manifest(manifest))
+        stored_manifest, manifest_path = self._report_store.write_manifest(manifest)
+        return RunSummary(stored_manifest, manifest_path)
 
     @classmethod
     def _single_review_task(cls, submission: Submission) -> AuditTask:

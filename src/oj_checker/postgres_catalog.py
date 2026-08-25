@@ -73,7 +73,15 @@ class PostgresSubmissionCatalog:
             s.input_digest,
             s.submitted_at,
             COALESCE(s.input_manifest, '{}'::jsonb) AS input_manifest,
-            COALESCE(r.lab_definition, '{}'::jsonb) AS lab_definition
+            COALESCE(r.lab_definition, '{}'::jsonb) AS lab_definition,
+            s.active_result_run_id AS active_run_id,
+            r.state AS run_state,
+            COALESCE(r.result_info, '{}'::jsonb) AS run_result_info,
+            r.failure_class AS run_failure_class,
+            r.failure_reason AS run_failure_reason,
+            r.score AS run_score,
+            r.performance AS run_performance,
+            r.finished_at AS run_finished_at
         """
         join = "LEFT JOIN oj_submission_runs r ON r.id = s.active_result_run_id"
 
@@ -102,6 +110,14 @@ class PostgresSubmissionCatalog:
             submitted_at=row["submitted_at"],
             input_manifest=row["input_manifest"],
             lab_definition=row["lab_definition"],
+            active_run_id=row["active_run_id"],
+            run_state=row["run_state"],
+            run_result_info=row["run_result_info"],
+            run_failure_class=row["run_failure_class"],
+            run_failure_reason=row["run_failure_reason"],
+            run_score=row["run_score"],
+            run_performance=row["run_performance"],
+            run_finished_at=row["run_finished_at"],
         )
 
 

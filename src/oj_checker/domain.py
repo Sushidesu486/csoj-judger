@@ -28,8 +28,25 @@ class Submission:
     submitted_at: datetime
     input_manifest: Mapping[str, Any]
     lab_definition: Mapping[str, Any]
+    active_run_id: int | None = None
+    run_state: str | None = None
+    run_result_info: Mapping[str, Any] = field(default_factory=dict)
+    run_failure_class: str | None = None
+    run_failure_reason: str | None = None
+    run_score: int | None = None
+    run_performance: float | None = None
+    run_finished_at: datetime | None = None
     status: str = "Success"
     is_valid: bool = True
+
+    def __post_init__(self) -> None:
+        if self.submitted_at.tzinfo is None or self.submitted_at.utcoffset() is None:
+            raise ValueError("submitted_at must be timezone-aware")
+        object.__setattr__(self, "submitted_at", self.submitted_at.astimezone(UTC))
+        if self.run_finished_at is not None:
+            if self.run_finished_at.tzinfo is None or self.run_finished_at.utcoffset() is None:
+                raise ValueError("run_finished_at must be timezone-aware")
+            object.__setattr__(self, "run_finished_at", self.run_finished_at.astimezone(UTC))
 
     def to_manifest_entry(self, lab_definition_key: str) -> dict[str, Any]:
         return {
@@ -41,6 +58,18 @@ class Submission:
             "submitted_at": self.submitted_at.isoformat(),
             "input_manifest": dict(self.input_manifest),
             "lab_definition_key": lab_definition_key,
+            "active_run": {
+                "id": self.active_run_id,
+                "state": self.run_state,
+                "result_info": dict(self.run_result_info),
+                "failure_class": self.run_failure_class,
+                "failure_reason": self.run_failure_reason,
+                "score": self.run_score,
+                "performance": self.run_performance,
+                "finished_at": (
+                    self.run_finished_at.isoformat() if self.run_finished_at is not None else None
+                ),
+            },
         }
 
 

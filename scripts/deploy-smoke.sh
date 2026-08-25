@@ -8,6 +8,13 @@ JOB_NAME=oj-checker-smoke
 REMOTE_ZIPAPP=/tmp/oj-checker.pyz
 REMOTE_JOB=/tmp/oj-checker-smoke-job.yaml
 
+if [[ -n $(git -C "$ROOT_DIR" status --porcelain) ]]; then
+  echo "refusing to deploy an uncommitted working tree" >&2
+  exit 1
+fi
+
+GIT_COMMIT=$(git -C "$ROOT_DIR" rev-parse HEAD)
+
 make -C "$ROOT_DIR" zipapp
 scp -q "$ROOT_DIR/dist/oj-checker.pyz" "$REMOTE:$REMOTE_ZIPAPP"
 scp -q "$ROOT_DIR/deploy/kubernetes/smoke-job.yaml" "$REMOTE:$REMOTE_JOB"
@@ -16,7 +23,8 @@ ssh -o BatchMode=yes "$REMOTE" \
   "kubectl -n '$NAMESPACE' create configmap oj-checker-dev-code --from-file=oj-checker.pyz='$REMOTE_ZIPAPP' --dry-run=client -o yaml | kubectl apply -f -"
 ssh -o BatchMode=yes "$REMOTE" \
   "kubectl -n '$NAMESPACE' delete job '$JOB_NAME' --ignore-not-found --wait=true"
-ssh -o BatchMode=yes "$REMOTE" "kubectl apply -f '$REMOTE_JOB'"
+ssh -o BatchMode=yes "$REMOTE" \
+  "kubectl set env --local -f '$REMOTE_JOB' OJ_CHECKER_GIT_COMMIT='$GIT_COMMIT' -o yaml | kubectl apply -f -"
 
 if ! ssh -o BatchMode=yes "$REMOTE" \
   "kubectl -n '$NAMESPACE' wait --for=condition=complete job/'$JOB_NAME' --timeout=900s"; then

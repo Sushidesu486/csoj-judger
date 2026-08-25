@@ -17,4 +17,6 @@
 scripts/deploy-smoke.sh
 ```
 
+部署脚本拒绝未提交的工作树，并把当前真实 Git commit SHA 注入 Job；清单中的 `REQUIRED_AT_DEPLOY_TIME` 只是防止绕过脚本后误生成不可追踪报告的占位符。
+
 开发 Job 使用现有 `oj-audit-db` Secret，但通过 `PGOPTIONS` 和 psycopg connection/transaction 设置强制只读。由于该 Secret 背后的数据库角色实际上具备写权限，它不能用于生产部署。

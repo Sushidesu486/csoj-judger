@@ -29,3 +29,4 @@ scripts/deploy-smoke.sh
 ```
 
 `deploy-smoke.sh` 会更新开发 ConfigMap、重建 `oj-checker-smoke` Job、等待完成并输出日志。该 Job 不读取 LLM Secret，也不调用 glm。
+脚本仅接受干净工作树，并把真实 Git commit SHA 写入本次 manifest。

@@ -164,7 +164,7 @@ audit-reports/
   plagiarism/<lab>/<pair-key>.json
 ```
 
-manifest 冻结所选 submission 的 owner、score、提交时间、input manifest，并按内容哈希去重 lab definition，使 worker 无需重新查询 DB。写入流程是同目录临时文件、flush/fsync、原子 hard-link create-only；同内容可幂等复用，不同内容不能覆盖已有 `run_id`。批次文件记录 Git commit、UTC cutoff、规则版本、prompt 版本、模型、阈值和 completion 数。
+manifest 冻结所选 submission 的 owner、score、提交时间、input manifest、active run state/result_info，并按内容哈希去重 lab definition，使 worker 无需重新查询 DB。写入流程是同目录临时文件、flush/fsync、原子 hard-link create-only；规划身份相同时复用原始 `generated_at`，不同内容不能覆盖已有 `run_id`。批次文件记录真实 Git commit、UTC cutoff、规则版本、prompt 版本、模型、阈值和 completion 数。
 
 ## 建议确认的测试 seam
 
