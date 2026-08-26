@@ -63,6 +63,9 @@ class PostgresSubmissionCatalog:
         if request.owners:
             conditions.append("s.owner = ANY(%s)")
             parameters.append(list(request.owners))
+        if request.submission_ids:
+            conditions.append("s.id = ANY(%s::uuid[])")
+            parameters.append(list(request.submission_ids))
 
         where_clause = " AND ".join(conditions)
         columns = """

@@ -96,6 +96,21 @@ prompt 构造、schema 校验、重试与速率限制都留在 module implementa
 
 首版只有一个 filesystem implementation，根路径可指向 NFS 或测试临时目录，因此不引入额外 adapter seam。它负责内容寻址、原子写入、断点续跑和派生索引。
 
+### `ComplianceReportQuery`
+
+报告 API 的外部 seam 是单提交查询/现场审查：
+
+```python
+get_submission_report(submission_id: str) -> ComplianceReport | None
+launch_single_review(submission_id: str) -> ReviewLaunchResult
+```
+
+HTTP adapter 只接受一个规范 UUID。`launch_single_review` 通过
+`AuditRequest.submission_id` 进入现有 `AuditRunner`，因此现场审查不会退化
+成全 lab 批次，也不会创建跨学生 plagiarism 任务。报告查询实现隐藏
+`owners/` 目录、缓存刷新和内部 JSON schema，只向调用方返回稳定的 verdict、
+证据摘要和 provenance。
+
 ## Source bundle 策略
 
 “最大文件”不是合法的审查策略。每个 source bundle 应包含：
@@ -138,7 +153,7 @@ m601 是 control-plane 节点但当前无 taint，因此必须设置 CPU/内存 
 
 ## 数据库只读防线
 
-当前 `oj-audit-db` 实际使用的 `plat101` 角色具备写权限，不能视为生产安全配置。
+开发 `oj-audit-db` 实际使用的 `plat101` 角色具备写权限，不能用于正式审查。2026-08-25 已创建 `oj_checker_ro` 和 `oj-audit-db-ro`；前者只拥有 `oj_submissions`、`oj_submission_runs` 的 `SELECT`，并已验证无 UPDATE、schema CREATE、superuser、CREATEROLE、CREATEDB、REPLICATION 或 BYPASSRLS 权限。
 
 首版开发 Pod 同时使用：
 
@@ -147,7 +162,7 @@ m601 是 control-plane 节点但当前无 taint，因此必须设置 CPU/内存 
 - 固定、参数化的 SELECT 查询。
 - `statement_timeout`、`lock_timeout` 和 `idle_in_transaction_session_timeout`。
 
-生产前必须创建 `oj_checker_ro` 角色，只授予所需表的 SELECT；代码级只读是第二道防线，不是数据库授权的替代品。
+正式 canary 使用 `oj-audit-db-ro`。代码级只读仍必须保留，它是数据库授权之外的额外防线。
 
 ## NFS 状态布局
 
@@ -189,6 +204,6 @@ TDD 只在以下 interface 上验证行为：
 
 ## 当前实现边界
 
-第一条垂直切片已实现 read-only snapshot、最高分单审任务、全部历史 exact-digest pair 和不可变 manifest。`--limit` 只限制单审任务，不裁剪抄袭语料。
+当前单 Pod 正式链路已经实现 read-only snapshot、固定 Git review basis、baseline delta、三层相似候选、两类结构化 Reviewer、完整 review identity、不可变 cache/task result、owner/plagiarism 派生报告和断点式跨批次复用。`audit --lab` 不提供 `--limit`；一个 lab canary 会覆盖该 lab 每个学生的最高提交，而抄袭侧始终保留全部合格历史提交。若源码预算导致 delta 不完整，Layer 1/2 会安全跳过并在 manifest、summary 和 CLI 中显式记录 exclusion，不能静默漏审。MinHash 签名按提交使用独立进程并行计算，正式 CLI 默认 8 workers；worker 数只属于执行配置，不参与 review identity。
 
-公共 baseline digest 排除将在 `SubmissionStore.load_bundle` 切片中实现；在此之前 exact-digest 结果仍是候选信号，不能直接视为抄袭结论。MinHash、Reviewer 和生产 Indexed CronJob 也尚未实现。
+尚未启用的是 Indexed Job 多 Pod 分片和夜间 CronJob。`deploy/kubernetes/canary-job.yaml` 先以单个 m601 Pod 验证正式数据规模、prompt schema、报告与 cache；确认资源和吞吐后，再把相同 manifest/task key 按 completion index 分片并纳入 GitOps。

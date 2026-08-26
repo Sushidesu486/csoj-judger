@@ -16,6 +16,7 @@ class SelectionPolicy(StrEnum):
 class AuditTaskKind(StrEnum):
     SINGLE_REVIEW = "single_review"
     EXACT_DUPLICATE = "exact_duplicate"
+    PLAGIARISM_REVIEW = "plagiarism_review"
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +82,7 @@ class SnapshotRequest:
     labs: tuple[str, ...] = field(default_factory=tuple)
     owners: tuple[str, ...] = field(default_factory=tuple)
     limit: int | None = None
+    submission_ids: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if self.cutoff.tzinfo is None or self.cutoff.utcoffset() is None:
@@ -88,6 +90,8 @@ class SnapshotRequest:
         object.__setattr__(self, "cutoff", self.cutoff.astimezone(UTC))
         if self.limit is not None and self.limit <= 0:
             raise ValueError("snapshot limit must be positive")
+        if any(not submission_id.strip() for submission_id in self.submission_ids):
+            raise ValueError("snapshot submission IDs must not be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +114,8 @@ class AuditRequest:
     model: str | None = None
     similarity_threshold: float | None = None
     completion_count: int = 1
+    submission_id: str | None = None
+    execute_reviews: bool = False
 
     def __post_init__(self) -> None:
         if self.cutoff.tzinfo is None or self.cutoff.utcoffset() is None:
@@ -119,6 +125,8 @@ class AuditRequest:
             raise ValueError("audit limit must be positive")
         if self.completion_count <= 0:
             raise ValueError("completion_count must be positive")
+        if self.submission_id is not None and not self.submission_id.strip():
+            raise ValueError("submission_id must not be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +136,10 @@ class AuditTask:
     lab_id: str
     submission_ids: tuple[str, ...]
     input_digest: str
+    input_digests: tuple[str, ...] = field(default_factory=tuple)
+    source_delta_digests: tuple[str, ...] = field(default_factory=tuple)
+    similarity_signal: str | None = None
+    jaccard: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -136,6 +148,10 @@ class AuditTask:
             "lab_id": self.lab_id,
             "submission_ids": list(self.submission_ids),
             "input_digest": self.input_digest,
+            "input_digests": list(self.input_digests),
+            "source_delta_digests": list(self.source_delta_digests),
+            "similarity_signal": self.similarity_signal,
+            "jaccard": self.jaccard,
         }
 
 
@@ -158,6 +174,7 @@ class RunManifest:
     plagiarism_corpus_size: int
     submissions: tuple[Submission, ...]
     tasks: tuple[AuditTask, ...]
+    review_configuration: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.generated_at.tzinfo is None or self.generated_at.utcoffset() is None:
@@ -169,9 +186,9 @@ class RunManifest:
 
     @property
     def task_counts(self) -> dict[AuditTaskKind, int]:
-        counts = {kind: 0 for kind in AuditTaskKind}
+        counts: dict[AuditTaskKind, int] = {}
         for task in self.tasks:
-            counts[task.kind] += 1
+            counts[task.kind] = counts.get(task.kind, 0) + 1
         return counts
 
     def to_dict(self) -> dict[str, Any]:
@@ -202,6 +219,7 @@ class RunManifest:
             "lab_definitions": lab_definitions,
             "submissions": submissions,
             "tasks": [task.to_dict() for task in self.tasks],
+            "review_configuration": dict(self.review_configuration),
         }
 
 
@@ -209,6 +227,13 @@ class RunManifest:
 class RunSummary:
     manifest: RunManifest
     manifest_path: Path
+    cache_hit_count: int = 0
+    llm_call_count: int = 0
+    completed_review_count: int = 0
+    inconclusive_review_count: int = 0
+    failed_review_count: int = 0
+    similarity_exclusion_count: int = 0
+    result_paths: tuple[Path, ...] = field(default_factory=tuple)
 
     @property
     def task_counts(self) -> dict[AuditTaskKind, int]:

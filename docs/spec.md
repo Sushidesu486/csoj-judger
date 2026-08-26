@@ -35,8 +35,8 @@
 
 ## 安全要求
 
-- 生产凭据必须是专用数据库只读角色，只授予必要表的 `SELECT`。
-- 在专用只读角色就绪前，开发 Pod 必须同时使用连接参数 `default_transaction_read_only=on` 和显式只读事务。
+- 生产凭据使用专用数据库角色 `oj_checker_ro`，只授予 `oj_submissions`、`oj_submission_runs` 的 `SELECT`。
+- 所有 Pod 同时使用连接参数 `default_transaction_read_only=on` 和显式只读事务，作为数据库授权之外的第二、第三道防线。
 - SQL 必须固定并参数化；调用方不得传入列名或 SQL 片段。
 - Submission 和 baseline NFS 挂载只读；报告根目录单独读写挂载。
 - Pod 禁用 ServiceAccount token 自动挂载、提权和多余 Linux capabilities。
@@ -81,6 +81,24 @@
 - 在 OJ DB 中创建队列表或保存报告。
 - 首版构建 Web 管理界面。
 - 把一次 LLM verdict 当作最终处分依据。
+
+## 单提交报告 API
+
+Checker 提供一个集群内、单提交范围的 HTTP API，供后续 Platform 管理页或
+其他受控调用方使用。API 不接受 lab、owner 或 submission ID 数组，也不接受
+源码路径。
+
+```text
+GET  /v1/compliance/submissions/{submission_id}
+POST /v1/compliance/reviews
+     {"submission_id": "<uuid>"}
+```
+
+`GET` 只读取已有的不可变单提交合规报告；`POST` 现场启动一次只针对该
+Submission 的合规审查，不生成 plagiarism 任务。两者都只返回
+`compliant`、`violation` 或 `inconclusive` 语义，不能把缺少报告或审查失败
+解释为合规。API 服务只挂载报告 PVC 和提交输入，只通过只读 DB 账号取得
+现场审查所需的 Submission 元数据。
 
 ## 验收顺序
 

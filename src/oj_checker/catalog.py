@@ -41,6 +41,7 @@ class InMemorySubmissionCatalog:
             and item.submitted_at <= request.cutoff
             and (not request.labs or item.lab_id in request.labs)
             and (not request.owners or item.owner in request.owners)
+            and (not request.submission_ids or item.id in request.submission_ids)
         )
 
 

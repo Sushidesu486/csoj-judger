@@ -75,6 +75,9 @@ class SourceBundle:
     submission_id: str
     files: tuple[SourceFile, ...]
     total_bytes_read: int
+    declared_paths: tuple[str, ...] = field(default_factory=tuple)
+    required_patterns: tuple[str, ...] = field(default_factory=tuple)
+    allowed_patterns: tuple[str, ...] = field(default_factory=tuple)
 
 
 class SubmissionStore(Protocol):
@@ -159,7 +162,14 @@ class NfsSubmissionStore:
             )
             total_bytes_read += len(data)
 
-        return SourceBundle(submission.id, tuple(source_files), total_bytes_read)
+        return SourceBundle(
+            submission.id,
+            tuple(source_files),
+            total_bytes_read,
+            declared_paths=tuple(path for path, *_ in sorted(entries)),
+            required_patterns=_lab_required_patterns(submission.lab_definition),
+            allowed_patterns=_lab_allowed_patterns(submission.lab_definition),
+        )
 
 
 def _validate_submission_id(submission_id: str) -> None:
@@ -188,20 +198,14 @@ def _is_source_path(
     if name in policy.source_names or suffix in policy.source_suffixes:
         return True
     return any(
-        _matches_lab_pattern(path, pattern)
+        matches_submission_pattern(path, pattern)
         for pattern in _lab_file_patterns(lab_definition)
     )
 
 
 def _lab_file_patterns(lab_definition: Mapping[str, object]) -> tuple[str, ...]:
-    spec = lab_definition.get("spec")
-    if not isinstance(spec, Mapping):
-        return ()
-    submissions = spec.get("submissions")
-    if not isinstance(submissions, Mapping):
-        return ()
-    home = submissions.get("home")
-    if not isinstance(home, Mapping):
+    home = _lab_home(lab_definition)
+    if home is None:
         return ()
 
     patterns: list[str] = []
@@ -213,7 +217,41 @@ def _lab_file_patterns(lab_definition: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(patterns)
 
 
-def _matches_lab_pattern(path: str, pattern: str) -> bool:
+def _lab_required_patterns(lab_definition: Mapping[str, object]) -> tuple[str, ...]:
+    return _lab_patterns(lab_definition, "required")
+
+
+def _lab_allowed_patterns(lab_definition: Mapping[str, object]) -> tuple[str, ...]:
+    return _lab_patterns(lab_definition, "allow")
+
+
+def _lab_patterns(
+    lab_definition: Mapping[str, object],
+    key: str,
+) -> tuple[str, ...]:
+    home = _lab_home(lab_definition)
+    if home is None:
+        return ()
+    values = home.get(key)
+    if not isinstance(values, list):
+        return ()
+    return tuple(value for value in values if isinstance(value, str))
+
+
+def _lab_home(lab_definition: Mapping[str, object]) -> Mapping[str, object] | None:
+    spec = lab_definition.get("spec")
+    if not isinstance(spec, Mapping):
+        return None
+    submissions = spec.get("submissions")
+    if not isinstance(submissions, Mapping):
+        return None
+    home = submissions.get("home")
+    if not isinstance(home, Mapping):
+        return None
+    return home
+
+
+def matches_submission_pattern(path: str, pattern: str) -> bool:
     if (
         not pattern
         or pattern.startswith("/")

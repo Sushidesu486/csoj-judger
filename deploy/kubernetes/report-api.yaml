@@ -1,0 +1,200 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oj-checker-report-api
+  namespace: csoj-judger
+  labels:
+    app.kubernetes.io/name: oj-checker
+    app.kubernetes.io/component: report-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oj-checker
+      app.kubernetes.io/component: report-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oj-checker
+        app.kubernetes.io/component: report-api
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Always
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - m601.clusters.zjusct.io
+      initContainers:
+        - name: fetch-review-basis
+          image: harbor.clusters.zjusct.io/library/oj-checker:REQUIRED_AT_DEPLOY_TIME
+          command: ["/bin/sh", "-ceu"]
+          args:
+            - |
+              git init /baseline/HPC101
+              git -C /baseline/HPC101 remote add origin https://github.com/ZJUSCT/HPC101.git
+              git -C /baseline/HPC101 fetch --depth=1 origin c12aaa26a346fd3fd8a39eceb3ac355ba14d19b0
+              git -C /baseline/HPC101 checkout --detach FETCH_HEAD
+              test "$(git -C /baseline/HPC101 rev-parse HEAD)" = c12aaa26a346fd3fd8a39eceb3ac355ba14d19b0
+          env:
+            - name: HOME
+              value: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: baseline
+              mountPath: /baseline
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: report-api
+          image: harbor.clusters.zjusct.io/library/oj-checker:REQUIRED_AT_DEPLOY_TIME
+          args: ["report-api", "--listen", "0.0.0.0:8080"]
+          env:
+            - name: DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: oj-audit-db-ro
+                  key: url
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: oj-audit-llm
+                  key: api-key
+            - name: LLM_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: oj-audit-llm
+                  key: base-url
+            - name: OJ_ROOT
+              value: /data/.oj
+            - name: REPORT_ROOT
+              value: /reports
+            - name: HPC101_REPOSITORY
+              value: /baseline/HPC101
+            - name: HPC101_REVISION
+              value: c12aaa26a346fd3fd8a39eceb3ac355ba14d19b0
+            - name: OJ_CHECKER_GIT_COMMIT
+              value: REQUIRED_AT_DEPLOY_TIME
+            - name: PGOPTIONS
+              value: >-
+                -c default_transaction_read_only=on
+                -c statement_timeout=30000
+                -c lock_timeout=1000
+                -c idle_in_transaction_session_timeout=30000
+                -c application_name=oj-checker-report-api
+            # Optional during development. Production should provide this key
+            # through the cluster's external Secret management.
+            - name: REPORT_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: oj-checker-report-api
+                  key: token
+                  optional: true
+          ports:
+            - name: http
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: baseline
+              mountPath: /baseline
+              readOnly: true
+            - name: submissions
+              mountPath: /data
+              readOnly: true
+            - name: reports
+              mountPath: /reports
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: baseline
+          emptyDir: {}
+        - name: submissions
+          nfs:
+            server: root.clusters.zjusct.io
+            path: /tank/hpc101/submissions
+            readOnly: true
+        - name: reports
+          persistentVolumeClaim:
+            claimName: oj-checker-reports-20260825
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oj-checker-report-api
+  namespace: csoj-judger
+  labels:
+    app.kubernetes.io/name: oj-checker
+    app.kubernetes.io/component: report-api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: oj-checker
+    app.kubernetes.io/component: report-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: oj-checker-report-api-ingress
+  namespace: csoj-judger
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: oj-checker
+      app.kubernetes.io/component: report-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: plat101-system
+      ports:
+        - protocol: TCP
+          port: 8080

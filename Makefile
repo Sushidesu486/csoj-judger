@@ -16,7 +16,11 @@ check: test typecheck lint
 
 zipapp:
 	mkdir -p dist
-	python3 -m zipapp src -m 'oj_checker.cli:entrypoint' -o dist/oj-checker.pyz
+	tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	cp -R src/oj_checker "$$tmp/oj_checker"; \
+	find "$$tmp" -type d -name __pycache__ -prune -exec rm -rf {} +; \
+	python3 -m zipapp "$$tmp" -m 'oj_checker.cli:entrypoint' -o dist/oj-checker.pyz
 
 image:
 	docker build --platform $(PLATFORM) --tag $(IMAGE) .

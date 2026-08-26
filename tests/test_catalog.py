@@ -52,6 +52,26 @@ def test_snapshot_normalizes_cutoff_to_utc() -> None:
     assert snapshot.cutoff.isoformat() == "2026-08-25T02:30:00+00:00"
 
 
+def test_snapshot_can_select_one_submission() -> None:
+    catalog = InMemorySubmissionCatalog(
+        [
+            submission("alice-old", "alice", "lab2", 70, "2026-08-20T10:00:00Z"),
+            submission("alice-best", "alice", "lab2", 90, "2026-08-21T10:00:00Z"),
+            submission("bob", "bob", "lab2", 85, "2026-08-21T12:00:00Z"),
+        ]
+    )
+
+    snapshot = catalog.snapshot(
+        SnapshotRequest(
+            SelectionPolicy.ALL_QUALIFYING,
+            cutoff=datetime(2026, 8, 22, tzinfo=UTC),
+            submission_ids=("alice-old",),
+        )
+    )
+
+    assert [item.id for item in snapshot.submissions] == ["alice-old"]
+
+
 def submission(
     submission_id: str,
     owner: str,
