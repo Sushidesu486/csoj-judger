@@ -51,6 +51,7 @@ def test_compliance_review_retries_and_parses_reasoning_content() -> None:
     assert result.verdict["decision"] == "violation"
     assert result.verdict["violations"][0]["category"] == "constraint_violation"
     assert client.call_count == 2
+    assert "Simplified Chinese" in client.messages[-1][0].content
     assert "Do not skip TwoPuncture" in client.messages[-1][1].content
     assert "cached_result.bin" in client.messages[-1][1].content
 
@@ -228,7 +229,7 @@ class ScriptedChatClient:
 
 def compliance_task() -> ComplianceReviewTask:
     return ComplianceReviewTask(
-        identity=identity("compliance", "compliance-v1", "compliance-result-v1"),
+        identity=identity("compliance", "compliance-v2", "compliance-result-v1"),
         owner="alice",
         score=120,
         lab_definition={"spec": {"submissions": {"home": {"allow": ["src/**"]}}}},

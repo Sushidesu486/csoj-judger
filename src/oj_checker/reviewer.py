@@ -310,7 +310,9 @@ def _compliance_messages(
             "system",
             "You audit HPC lab submissions. Use only supplied evidence. Return one JSON object, "
             "never a disciplinary action. Mark inconclusive when evidence is insufficient or the "
-            "baseline delta or prompt evidence is marked incomplete.",
+            "baseline delta or prompt evidence is marked incomplete. Write every human-readable "
+            "summary and evidence description in Simplified Chinese. Keep JSON keys, enum values, "
+            "identifiers, and file paths exactly as specified.",
         ),
         ChatMessage(
             "user",

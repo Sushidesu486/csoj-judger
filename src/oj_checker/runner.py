@@ -55,7 +55,7 @@ class ReviewPipeline:
     ledger: ReviewLedger
     source_policy: SourcePolicy
     model_parameters: tuple[tuple[str, ModelParameter], ...]
-    compliance_prompt_version: str = "compliance-v1"
+    compliance_prompt_version: str = "compliance-v2"
     compliance_schema_version: str = "compliance-result-v1"
     plagiarism_prompt_version: str = "plagiarism-v1"
     plagiarism_schema_version: str = "plagiarism-result-v1"

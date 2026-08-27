@@ -200,7 +200,7 @@ def _audit(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
             min_score=args.min_score,
             labs=(args.lab,),
             rules_version=args.rules_version,
-            prompt_version="compliance-v1+plagiarism-v1",
+            prompt_version="compliance-v2+plagiarism-v1",
             model=args.model,
             similarity_threshold=args.similarity_threshold,
             execute_reviews=True,

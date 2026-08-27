@@ -431,7 +431,7 @@ class RunnerReviewLauncher:
                     min_score=self._min_score,
                     submission_id=submission_id,
                     rules_version=self._rules_version,
-                    prompt_version="compliance-v1",
+                    prompt_version="compliance-v2",
                     model=self._model,
                     execute_reviews=True,
                 )
