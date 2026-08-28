@@ -38,7 +38,7 @@ spec:
                       - m601.clusters.zjusct.io
       initContainers:
         - name: fetch-review-basis
-          image: harbor.clusters.zjusct.io/library/oj-checker@sha256:a3fe2702d54f58663b9269adc1d7af22110878cb590afc45a5ea40102f9003fe
+          image: harbor.clusters.zjusct.io/library/oj-checker@sha256:c99bfd47836180f3c06524a74ff1d983e88e3f11fe04f7c7ef40229be7e7d41f
           command: ["/bin/sh", "-ceu"]
           args:
             - |
@@ -69,7 +69,7 @@ spec:
               mountPath: /tmp
       containers:
         - name: report-api
-          image: harbor.clusters.zjusct.io/library/oj-checker@sha256:a3fe2702d54f58663b9269adc1d7af22110878cb590afc45a5ea40102f9003fe
+          image: harbor.clusters.zjusct.io/library/oj-checker@sha256:c99bfd47836180f3c06524a74ff1d983e88e3f11fe04f7c7ef40229be7e7d41f
           args: ["report-api", "--listen", "0.0.0.0:8080"]
           env:
             - name: DB_URL
@@ -96,7 +96,7 @@ spec:
             - name: HPC101_REVISION
               value: c12aaa26a346fd3fd8a39eceb3ac355ba14d19b0
             - name: OJ_CHECKER_GIT_COMMIT
-              value: ad0fd8eda1b5882eaaf05553236f8f33bcdfd4a8
+              value: 301cfc24ebccd773dffd41a594c05368ffc54a2b
             - name: REPORT_API_ALLOWED_MODELS
               value: glm-5.3,gpt-5.6-luna
             - name: PGOPTIONS
