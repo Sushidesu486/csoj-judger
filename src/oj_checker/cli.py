@@ -10,6 +10,7 @@ from typing import Any, Never
 
 from oj_checker.catalog import best_per_owner_lab
 from oj_checker.domain import AuditRequest, SelectionPolicy, SnapshotRequest
+from oj_checker.nightly import HTTPComplianceClient, NightlyReviewRunner
 from oj_checker.postgres_catalog import PostgresSubmissionCatalog
 from oj_checker.report_api import (
     ComplianceApi,
@@ -67,6 +68,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "report-api":
             _report_api(settings, args)
             return 0
+        exit_status = 0
         if args.command == "doctor":
             result = _doctor(settings, lab=args.lab)
         elif args.command == "plan":
@@ -75,10 +77,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             doctor = _doctor(settings, lab=args.lab)
             plan = _plan(settings, args)
             result = {"doctor": doctor, "plan": plan, "llm_checked": False}
+        elif args.command == "nightly":
+            result = _nightly(settings, args)
+            if result["failed_count"]:
+                exit_status = 1
         else:
             result = _audit(settings, args)
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
-        return 0
+        return exit_status
     except Exception as error:
         print(
             json.dumps(
@@ -181,7 +187,6 @@ def _audit(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
     runner, basis_provider = _build_review_runner(
         settings,
         output_root=output_root,
-        model=args.model,
         similarity_threshold=args.similarity_threshold,
         shingle_size=args.shingle_size,
         num_permutations=args.num_permutations,
@@ -229,7 +234,6 @@ def _build_review_runner(
     settings: Settings,
     *,
     output_root: Path,
-    model: str,
     similarity_threshold: float,
     shingle_size: int,
     num_permutations: int,
@@ -245,6 +249,8 @@ def _build_review_runner(
         raise RuntimeError("LLM_API_KEY is required for an audit run")
     if not settings.hpc101_revision:
         raise RuntimeError("HPC101_REVISION must pin the authoritative upstream commit")
+    if max_attempts > 2:
+        raise ValueError("max_attempts must not exceed two")
     basis_provider = GitReviewBasisProvider(
         settings.hpc101_repository,
         settings.hpc101_revision,
@@ -293,7 +299,6 @@ def _report_api(settings: Settings, args: argparse.Namespace) -> None:
     runner, _ = _build_review_runner(
         settings,
         output_root=settings.report_root,
-        model=args.model,
         similarity_threshold=0.7,
         shingle_size=5,
         num_permutations=64,
@@ -309,13 +314,34 @@ def _report_api(settings: Settings, args: argparse.Namespace) -> None:
         FileComplianceReportReader(settings.report_root),
         RunnerReviewLauncher(
             runner,
-            model=args.model,
             min_score=args.min_score,
             clock=lambda: datetime.now(UTC),
         ),
+        allowed_models=_parse_models(args.allowed_models),
         auth_token=args.api_token,
     )
     serve_report_api(api, args.listen)
+
+
+def _nightly(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    if not settings.hpc101_revision:
+        raise RuntimeError("HPC101_REVISION must pin the authoritative upstream commit")
+    if not args.api_token:
+        raise RuntimeError("REPORT_API_TOKEN is required for a nightly run")
+    summary = NightlyReviewRunner(
+        PostgresSubmissionCatalog(settings.database_url),
+        HTTPComplianceClient(args.api_url, args.api_token),
+        basis_commit=settings.hpc101_revision,
+        clock=lambda: datetime.now(UTC),
+    ).run()
+    return summary.to_dict()
+
+
+def _parse_models(value: str) -> tuple[str, ...]:
+    models = tuple(dict.fromkeys(item.strip() for item in value.split(",") if item.strip()))
+    if not models:
+        raise ValueError("at least one allowed report API model is required")
+    return models
 
 
 def _parse_cutoff(value: str | None) -> datetime:
@@ -349,11 +375,27 @@ def _parser() -> argparse.ArgumentParser:
         default=os.environ.get("REPORT_API_LISTEN", "0.0.0.0:8080"),
     )
     report_api.add_argument(
-        "--model",
-        default=os.environ.get("REPORT_API_MODEL", "gpt-5.6-luna"),
+        "--allowed-models",
+        default=os.environ.get(
+            "REPORT_API_ALLOWED_MODELS",
+            "glm-5.3,gpt-5.6-luna",
+        ),
     )
     report_api.add_argument("--min-score", type=int, default=0)
     report_api.add_argument("--api-token", default=os.environ.get("REPORT_API_TOKEN"))
+
+    nightly = subparsers.add_parser(
+        "nightly",
+        help="review authoritative best submissions through the report API",
+    )
+    nightly.add_argument(
+        "--api-url",
+        default=os.environ.get(
+            "REPORT_API_URL",
+            "http://oj-checker-report-api.csoj-judger.svc.cluster.local:8080",
+        ),
+    )
+    nightly.add_argument("--api-token", default=os.environ.get("REPORT_API_TOKEN"))
 
     audit = subparsers.add_parser(
         "audit",

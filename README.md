@@ -17,13 +17,14 @@ OJ Arbiter 是 HPC101 OJ 的只读合规审查器。它从 plat101 PostgreSQL �
 - 本地 Git 仓库已初始化。
 - 已实现只读 DB 快照、双语料集、固定 Git baseline/实验文档和真实 baseline delta。
 - 相似检测包含整份提交 digest、delta digest、MinHash/LSH 和精确 shingle Jaccard。
-- 已实现 `gpt-5.6-luna` 流式结构化审查：每个学生最高提交的合规审查，以及全部历史提交候选对的抄袭裁决。
-- Review key 包含提交、delta、HPC101 commit/tree、实验规则、prompt/schema、模型与参数；成功结果写入不可变 ledger，完全相同的后续批次不会再次调用 LLM。
+- 已实现显式模型选择的流式结构化审查：每个学生最高提交的合规审查，以及全部历史提交候选对的抄袭裁决；所有 allowlist 模型共享同一上游 URL 和凭据，不做 fallback。
+- Review key 包含提交、delta、HPC101 commit/tree、实验规则、prompt/schema、模型与参数；合规通过和抄袭裁决写入不可变 ledger，合规违规会在下一夜重新调用 LLM。
 - Manifest 冻结 submission metadata 与 lab snapshot；相同 `run_id` 不允许覆盖不同内容。
 - `SubmissionStore.load_bundle` 已实现安全相对路径、symlink 防护、普通文件校验和多文件读取预算。
 - 已提供不调用 LLM 的 `doctor`、`plan`、`smoke` 命令，以及正式 `audit` 命令和固定到 m601 的 canary Job 模板。
-- 已提供 `report-api` 命令：只读查询单提交合规报告，或现场发起一次且仅针对一个 Submission 的审查；现场审查不生成 plagiarism 任务。
-- 集群已创建专用 `oj_checker_ro` 登录角色和 `oj-audit-db-ro` Secret；该角色只拥有 `oj_submissions`、`oj_submission_runs` 的 `SELECT`，且默认事务只读。代码仍保留连接参数与事务级只读作为第二道防线。
+- 已提供 `report-api` 命令：只读查询单提交合规报告，列出模型 allowlist，或现场按指定模型发起一次且仅针对一个 Submission 的审查；现场审查不生成 plagiarism 任务。
+- 已提供每天北京时间 02:00 的 `nightly` CronJob：从权威最高分表选择全部候选，固定请求 `glm-5.3`，不设置调用次数上限。
+- 集群已创建专用 `oj_checker_ro` 登录角色和 `oj-audit-db-ro` Secret；该角色只拥有 `oj_submissions`、`oj_submission_runs`、`oj_user_lab_best_scores` 的 `SELECT`，且默认事务只读。代码仍保留连接参数与事务级只读作为第二道防线。
 
 ## 正式审查入口
 
@@ -42,7 +43,8 @@ oj-checker audit --lab lab4-cpu --model gpt-5.6-luna
 正式入口默认使用 8 个独立进程并行计算各提交的 MinHash 签名；可通过
 `--similarity-workers` 调整。该参数只影响候选生成速度，不改变候选身份或审查 cache。
 
-只有 `completed` 且非 `inconclusive` 的结果会进入跨批次 cache。失败、无法解析和 `inconclusive` 都会在后续批次重新审查。LLM 结论始终只是人工复核线索。
+合规审查只有 `compliant` 结果会进入跨批次 cache。违规、失败、无法解析和
+`inconclusive` 都会在后续夜间批次重新审查。LLM 结论始终只是人工复核线索。
 
 ## 开发命令
 

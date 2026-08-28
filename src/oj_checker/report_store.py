@@ -134,11 +134,15 @@ class FileReportStore:
         if not _SAFE_TASK_KEY.fullmatch(review_key):
             raise ValueError("review_key must be a lowercase SHA-256 digest")
         response_key = hashlib.sha256(model_response_digest.encode()).hexdigest()
+        report_key = _json_digest(review)
         target = (
             self._root
             / "owners"
             / owner
-            / f"{lab_id}__{review_key[:16]}__{response_key[:16]}.json"
+            / (
+                f"{lab_id}__{review_key[:16]}__{response_key[:16]}"
+                f"__{report_key[:16]}.json"
+            )
         )
         return _write_immutable_json(target, review)
 

@@ -39,7 +39,9 @@ scripts/deploy-smoke.sh
 
 `report-api.yaml` deploys the internal API for one-submission compliance
 lookups and on-demand reviews. It is intentionally a ClusterIP-only service;
-it has no public HTTPRoute and accepts exactly one `submission_id` per review.
+it has no public HTTPRoute and accepts exactly one `submission_id` plus one
+allowlisted `model` per review. All models use the same configured upstream URL
+and credential; callers cannot supply either value.
 
 The API Pod mounts the report PVC read/write because an on-demand review writes
 an immutable result. Submission input and the HPC101 review basis remain
@@ -57,6 +59,26 @@ Endpoints:
 
 ```text
 GET  /healthz
+GET  /v1/compliance/models
 GET  /v1/compliance/submissions/{submission_id}
-POST /v1/compliance/reviews  {"submission_id":"<uuid>"}
+POST /v1/compliance/reviews  {"submission_id":"<uuid>","model":"gpt-5.6-luna"}
 ```
+
+## Nightly compliance review
+
+`nightly-cronjob.yaml` starts at 02:00 in `Asia/Shanghai`. It reads each
+authoritative best Submission from `oj_user_lab_best_scores`, calls the report
+API sequentially with the fixed model `glm-5.3`, and skips only a current
+allowlisted compliant report. There is no LLM call budget. The Job has no LLM
+credential, Submission mount, or long-running scheduler; all LLM work remains
+serialized by the report API.
+
+The read-only database role additionally needs:
+
+```sql
+GRANT SELECT ON oj_user_lab_best_scores TO <oj_audit_read_only_role>;
+```
+
+Transient LLM failures are attempted at most twice by the report API. The
+CronJob itself has `backoffLimit: 0`, continues with the next Submission, and
+leaves failed items for the following night.

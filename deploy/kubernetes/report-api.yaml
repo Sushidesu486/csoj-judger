@@ -97,6 +97,8 @@ spec:
               value: c12aaa26a346fd3fd8a39eceb3ac355ba14d19b0
             - name: OJ_CHECKER_GIT_COMMIT
               value: REQUIRED_AT_DEPLOY_TIME
+            - name: REPORT_API_ALLOWED_MODELS
+              value: glm-5.3,gpt-5.6-luna
             - name: PGOPTIONS
               value: >-
                 -c default_transaction_read_only=on
@@ -195,6 +197,13 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: plat101-system
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: csoj-judger
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: oj-checker
+              app.kubernetes.io/component: nightly-review
       ports:
         - protocol: TCP
           port: 8080

@@ -56,6 +56,31 @@ def test_compliance_review_retries_and_parses_reasoning_content() -> None:
     assert "cached_result.bin" in client.messages[-1][1].content
 
 
+def test_compliance_review_does_not_retry_a_malformed_model_response() -> None:
+    client = ScriptedChatClient(
+        [
+            ModelReply(content="not JSON", reasoning_content=None),
+            ModelReply(
+                content=(
+                    '{"decision":"compliant","confidence":0.9,"violations":[],'
+                    '"summary":"No violation found.","requires_human_review":false}'
+                ),
+                reasoning_content=None,
+            ),
+        ]
+    )
+    reviewer = OpenAICompatibleReviewer(
+        client,
+        clock=lambda: datetime(2026, 8, 25, 10, 0, tzinfo=UTC),
+        max_attempts=2,
+    )
+
+    with pytest.raises(ReviewParseError):
+        reviewer.review(compliance_task())
+
+    assert client.call_count == 1
+
+
 def test_plagiarism_review_accepts_minor_edit_relationship() -> None:
     client = ScriptedChatClient(
         [

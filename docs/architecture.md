@@ -153,7 +153,11 @@ m601 是 control-plane 节点但当前无 taint，因此必须设置 CPU/内存 
 
 ## 数据库只读防线
 
-开发 `oj-audit-db` 实际使用的 `plat101` 角色具备写权限，不能用于正式审查。2026-08-25 已创建 `oj_checker_ro` 和 `oj-audit-db-ro`；前者只拥有 `oj_submissions`、`oj_submission_runs` 的 `SELECT`，并已验证无 UPDATE、schema CREATE、superuser、CREATEROLE、CREATEDB、REPLICATION 或 BYPASSRLS 权限。
+开发 `oj-audit-db` 实际使用的 `plat101` 角色具备写权限，不能用于正式审查。
+2026-08-25 已创建 `oj_checker_ro` 和 `oj-audit-db-ro`；前者只拥有
+`oj_submissions`、`oj_submission_runs`、`oj_user_lab_best_scores` 的
+`SELECT`，并已验证无 UPDATE、schema CREATE、superuser、CREATEROLE、
+CREATEDB、REPLICATION 或 BYPASSRLS 权限。
 
 首版开发 Pod 同时使用：
 
@@ -195,15 +199,23 @@ TDD 只在以下 interface 上验证行为：
 
 确认后按以上顺序做垂直切片，而不是一次性写完所有测试。
 
-## 部署阶段
+## 夜间执行
 
-1. `doctor` smoke test：m601 单 Pod，仅验证 DB 会话只读、NFS 可读、报告目录可写和 LLM 可达。
-2. canary Indexed Job：一个 lab、少量任务、2 个 completion。
-3. 重放昨日 429 个候选与已知非最高分 digest 案例。
-4. 夜间 Indexed CronJob：`schedule: "30 23 * * *"`，`timeZone: Asia/Shanghai`。
+夜间 CronJob 在 `Asia/Shanghai` 02:00 启动，只读取 Plat101 已维护的
+`oj_user_lab_best_scores`，不在 checker 内重新判定最高分。它逐条调用常驻
+report API 并固定发送 `model=glm-5.3`，因此和管理员现场审查共享同一个串行
+锁。CronJob 没有 LLM 凭据、Submission NFS 或常驻 scheduler，也没有调用
+次数预算；`concurrencyPolicy: Forbid`、`backoffLimit: 0` 和六小时 deadline
+限制重入和失败资源占用。
+
+只有当前最高分 Submission 已存在匹配当前 basis/rules/prompt/schema、且模型
+仍在 allowlist 中的 `compliant` 报告时才跳过。违规、证据不足和失败项留到
+下一晚再次审查；合规违规结果不会进入跨批次 cache。
 
 ## 当前实现边界
 
 当前单 Pod 正式链路已经实现 read-only snapshot、固定 Git review basis、baseline delta、三层相似候选、两类结构化 Reviewer、完整 review identity、不可变 cache/task result、owner/plagiarism 派生报告和断点式跨批次复用。`audit --lab` 不提供 `--limit`；一个 lab canary 会覆盖该 lab 每个学生的最高提交，而抄袭侧始终保留全部合格历史提交。若源码预算导致 delta 不完整，Layer 1/2 会安全跳过并在 manifest、summary 和 CLI 中显式记录 exclusion，不能静默漏审。MinHash 签名按提交使用独立进程并行计算，正式 CLI 默认 8 workers；worker 数只属于执行配置，不参与 review identity。
 
-尚未启用的是 Indexed Job 多 Pod 分片和夜间 CronJob。`deploy/kubernetes/canary-job.yaml` 先以单个 m601 Pod 验证正式数据规模、prompt schema、报告与 cache；确认资源和吞吐后，再把相同 manifest/task key 按 completion index 分片并纳入 GitOps。
+夜间链路保持单线程，不使用 Indexed Job 多 Pod 分片。部署清单见
+`deploy/kubernetes/nightly-cronjob.yaml`；启用日程前应先从该模板创建一次
+手工 Job，验证候选数量、跳过条件和 report API 串行行为。

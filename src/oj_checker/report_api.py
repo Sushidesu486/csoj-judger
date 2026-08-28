@@ -4,7 +4,7 @@ import json
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from http import HTTPStatus
@@ -23,7 +23,7 @@ class ComplianceReportReader(Protocol):
 
 
 class ReviewLauncher(Protocol):
-    def launch(self, submission_id: str) -> ReviewLaunchResult: ...
+    def launch(self, submission_id: str, model: str) -> ReviewLaunchResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +181,7 @@ class ComplianceApi:
         reader: ComplianceReportReader,
         launcher: ReviewLauncher,
         *,
+        allowed_models: Iterable[str],
         auth_token: str | None = None,
         max_body_bytes: int = 64 * 1024,
     ) -> None:
@@ -188,6 +189,11 @@ class ComplianceApi:
             raise ValueError("max_body_bytes must be positive")
         self._reader = reader
         self._launcher = launcher
+        self._allowed_models = tuple(dict.fromkeys(allowed_models))
+        if not self._allowed_models or any(
+            not model or model.strip() != model for model in self._allowed_models
+        ):
+            raise ValueError("allowed_models must contain non-empty model names")
         self._auth_token = auth_token
         self._max_body_bytes = max_body_bytes
         self._launch_lock = threading.Lock()
@@ -213,6 +219,15 @@ class ComplianceApi:
             )
 
         parts = [part for part in path.split("/") if part]
+        if parts == ["v1", "compliance", "models"]:
+            if method != "GET":
+                return self._error(
+                    HTTPStatus.METHOD_NOT_ALLOWED,
+                    "METHOD_NOT_ALLOWED",
+                    "method not allowed",
+                )
+            return self._json(HTTPStatus.OK, {"models": list(self._allowed_models)})
+
         if len(parts) == 4 and parts[:3] == ["v1", "compliance", "submissions"]:
             if method != "GET":
                 return self._error(
@@ -252,11 +267,11 @@ class ComplianceApi:
             payload = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             return self._error(HTTPStatus.BAD_REQUEST, "BAD_REQUEST", "body must be JSON")
-        if not isinstance(payload, dict) or set(payload) != {"submission_id"}:
+        if not isinstance(payload, dict) or set(payload) != {"submission_id", "model"}:
             return self._error(
                 HTTPStatus.BAD_REQUEST,
                 "BAD_REQUEST",
-                "body must contain exactly one submission_id",
+                "body must contain exactly one submission_id and model",
             )
         submission_id = payload.get("submission_id")
         if not isinstance(submission_id, str):
@@ -272,6 +287,13 @@ class ComplianceApi:
                 "BAD_REQUEST",
                 "submission_id must be a UUID",
             )
+        model = payload.get("model")
+        if not isinstance(model, str) or model not in self._allowed_models:
+            return self._error(
+                HTTPStatus.BAD_REQUEST,
+                "MODEL_NOT_ALLOWED",
+                "model is not allowed",
+            )
         if not self._launch_lock.acquire(blocking=False):
             return self._error(
                 HTTPStatus.TOO_MANY_REQUESTS,
@@ -279,7 +301,7 @@ class ComplianceApi:
                 "another review is running",
             )
         try:
-            result = self._launcher.launch(submission_id)
+            result = self._launcher.launch(submission_id, model)
         except LookupError:
             return self._error(
                 HTTPStatus.NOT_FOUND,
@@ -407,18 +429,16 @@ class RunnerReviewLauncher:
         self,
         runner: Any,
         *,
-        model: str,
         min_score: int = 0,
         rules_version: str = "audit-rules-v1",
         clock: Callable[[], datetime],
     ) -> None:
         self._runner = runner
-        self._model = model
         self._min_score = min_score
         self._rules_version = rules_version
         self._clock = clock
 
-    def launch(self, submission_id: str) -> ReviewLaunchResult:
+    def launch(self, submission_id: str, model: str) -> ReviewLaunchResult:
         from oj_checker.domain import AuditRequest
 
         started_at = self._clock()
@@ -432,7 +452,7 @@ class RunnerReviewLauncher:
                     submission_id=submission_id,
                     rules_version=self._rules_version,
                     prompt_version="compliance-v2",
-                    model=self._model,
+                    model=model,
                     execute_reviews=True,
                 )
             )

@@ -83,6 +83,7 @@ def test_api_get_requires_one_existing_submission_report(tmp_path) -> None:
     api = ComplianceApi(
         FileComplianceReportReader(tmp_path, refresh_seconds=0),
         FakeLauncher(),
+        allowed_models=("glm-5.3", "gpt-5.6-luna"),
         auth_token="secret",
     )
 
@@ -104,35 +105,57 @@ def test_api_get_requires_one_existing_submission_report(tmp_path) -> None:
     assert json.loads(found.body)["decision"] == "violation"
 
 
-def test_api_post_accepts_only_one_submission_id(tmp_path) -> None:
+def test_api_lists_allowed_models_and_requires_an_allowed_model_for_review(tmp_path) -> None:
     write_report(tmp_path, decision="compliant")
     launcher = FakeLauncher()
-    api = ComplianceApi(FileComplianceReportReader(tmp_path, refresh_seconds=0), launcher)
+    api = ComplianceApi(
+        FileComplianceReportReader(tmp_path, refresh_seconds=0),
+        launcher,
+        allowed_models=("glm-5.3", "gpt-5.6-luna"),
+    )
 
-    rejected = api.handle(
+    models = api.handle("GET", "/v1/compliance/models")
+    missing_model = api.handle(
         "POST",
         "/v1/compliance/reviews",
-        body=json.dumps({"submission_ids": [SUBMISSION_ID]}).encode(),
+        body=json.dumps({"submission_id": SUBMISSION_ID}).encode(),
+    )
+    unknown_model = api.handle(
+        "POST",
+        "/v1/compliance/reviews",
+        body=json.dumps(
+            {"submission_id": SUBMISSION_ID, "model": "unapproved-model"}
+        ).encode(),
     )
     accepted = api.handle(
         "POST",
         "/v1/compliance/reviews",
-        body=json.dumps({"submission_id": SUBMISSION_ID}).encode(),
+        body=json.dumps(
+            {"submission_id": SUBMISSION_ID, "model": "gpt-5.6-luna"}
+        ).encode(),
     )
 
-    assert rejected.status == 400
+    assert models.status == 200
+    assert json.loads(models.body) == {"models": ["glm-5.3", "gpt-5.6-luna"]}
+    assert missing_model.status == 400
+    assert unknown_model.status == 400
+    assert json.loads(unknown_model.body)["code"] == "MODEL_NOT_ALLOWED"
     assert accepted.status == 200
-    assert launcher.submission_ids == [SUBMISSION_ID]
+    assert launcher.requests == [(SUBMISSION_ID, "gpt-5.6-luna")]
     assert json.loads(accepted.body)["compliant"] is True
 
 
 def test_api_post_reports_failed_review_without_claiming_compliance(tmp_path) -> None:
-    api = ComplianceApi(FileComplianceReportReader(tmp_path, refresh_seconds=0), FailingLauncher())
+    api = ComplianceApi(
+        FileComplianceReportReader(tmp_path, refresh_seconds=0),
+        FailingLauncher(),
+        allowed_models=("glm-5.3",),
+    )
 
     response = api.handle(
         "POST",
         "/v1/compliance/reviews",
-        body=json.dumps({"submission_id": SUBMISSION_ID}).encode(),
+        body=json.dumps({"submission_id": SUBMISSION_ID, "model": "glm-5.3"}).encode(),
     )
 
     assert response.status == 502
@@ -147,11 +170,10 @@ def test_runner_launcher_builds_a_single_submission_request() -> None:
     runner = CapturingRunner()
     launcher = RunnerReviewLauncher(
         runner,
-        model="gpt-5.6-luna",
         clock=lambda: datetime(2026, 8, 26, 12, 0, tzinfo=UTC),
     )
 
-    result = launcher.launch(SUBMISSION_ID)
+    result = launcher.launch(SUBMISSION_ID, "gpt-5.6-luna")
 
     assert result.error is None
     assert runner.request.submission_id == SUBMISSION_ID
@@ -160,20 +182,21 @@ def test_runner_launcher_builds_a_single_submission_request() -> None:
     assert runner.request.owners == ()
     assert runner.request.execute_reviews is True
     assert runner.request.prompt_version == "compliance-v2"
+    assert runner.request.model == "gpt-5.6-luna"
 
 
 
 class FakeLauncher:
     def __init__(self) -> None:
-        self.submission_ids: list[str] = []
+        self.requests: list[tuple[str, str]] = []
 
-    def launch(self, submission_id: str) -> ReviewLaunchResult:
-        self.submission_ids.append(submission_id)
+    def launch(self, submission_id: str, model: str) -> ReviewLaunchResult:
+        self.requests.append((submission_id, model))
         return ReviewLaunchResult("manual-run")
 
 
 class FailingLauncher:
-    def launch(self, submission_id: str) -> ReviewLaunchResult:
+    def launch(self, submission_id: str, model: str) -> ReviewLaunchResult:
         return ReviewLaunchResult("manual-run", error="ReviewError")
 
 

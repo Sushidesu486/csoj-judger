@@ -137,7 +137,7 @@ class OpenAICompatibleReviewer:
                     model_response_digest=hashlib.sha256(raw_response.encode()).hexdigest(),
                     conclusive=verdict["decision"] != "inconclusive",
                 )
-            except (TransientReviewError, ReviewParseError) as current_error:
+            except TransientReviewError as current_error:
                 error = current_error
         if error is None:
             raise ReviewError("review failed without an error")
@@ -183,7 +183,7 @@ class OpenAIStreamingChatClient:
             with urllib.request.urlopen(request, timeout=self._timeout_seconds) as response:
                 return _read_stream(response)
         except urllib.error.HTTPError as error:
-            if error.code in {408, 409, 425, 429} or error.code >= 500:
+            if error.code in {408, 429} or error.code >= 500:
                 raise TransientReviewError(f"LLM upstream returned HTTP {error.code}") from None
             raise ReviewError(f"LLM request returned HTTP {error.code}") from None
         except (TimeoutError, urllib.error.URLError) as error:

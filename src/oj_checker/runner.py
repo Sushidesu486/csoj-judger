@@ -328,6 +328,12 @@ class AuditRunner:
         for task in manifest.tasks:
             review_task = review_tasks[task.key]
             cached = pipeline.ledger.lookup(review_task.identity)
+            if (
+                isinstance(review_task, ComplianceReviewTask)
+                and cached is not None
+                and cached.verdict.get("decision") != "compliant"
+            ):
+                cached = None
             resolved_review: CompletedReview | None = None
             if cached is not None:
                 cache_hits += 1
@@ -364,7 +370,10 @@ class AuditRunner:
                 else:
                     resolved_review = review
                     if review.conclusive:
-                        pipeline.ledger.record(review)
+                        if not isinstance(review_task, ComplianceReviewTask) or review.verdict.get(
+                            "decision"
+                        ) == "compliant":
+                            pipeline.ledger.record(review)
                         completed += 1
                         payload = {
                             "task_key": task.key,

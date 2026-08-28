@@ -320,6 +320,43 @@ def test_single_submission_review_rejects_missing_submission(tmp_path) -> None:
         )
 
 
+def test_compliance_violations_are_reviewed_again_until_one_passes(tmp_path) -> None:
+    item = submission("alice-best", "alice", 100, "alice-best", "2026-08-21T10:00:00Z")
+    reviewer = ViolationCountingReviewer()
+    pipeline = ReviewPipeline(
+        submission_store=MappingSubmissionStore({item.id: near_source("100")}),
+        basis_provider=StaticBasisProvider(),
+        delta_builder=BaselineDeltaBuilder(),
+        similarity_detector=SimilarityDetector(),
+        similarity_policy=SimilarityPolicy(jaccard_threshold=0.7, shingle_size=3),
+        reviewer=reviewer,
+        ledger=FileReviewLedger(tmp_path),
+        source_policy=SourcePolicy(),
+        model_parameters=(),
+    )
+    runner = AuditRunner(
+        InMemorySubmissionCatalog([item]),
+        FileReportStore(tmp_path),
+        clock=lambda: datetime(2026, 8, 25, 10, 0, tzinfo=UTC),
+        git_commit="test-commit",
+        review_pipeline=pipeline,
+    )
+
+    for run_id in ("violation-first", "violation-second"):
+        runner.run(
+            AuditRequest(
+                run_id=run_id,
+                cutoff=datetime(2026, 8, 22, tzinfo=UTC),
+                submission_id=item.id,
+                model="glm-5.3",
+                execute_reviews=True,
+            )
+        )
+
+    assert reviewer.call_count == 2
+    assert len(list((tmp_path / "owners" / "alice").glob("*.json"))) == 2
+
+
 def submission(
     submission_id: str,
     owner: str,
@@ -419,5 +456,26 @@ class CountingReviewer:
             completed_at=datetime(2026, 8, 25, 10, 0, tzinfo=UTC),
             verdict=verdict,
             model_response_digest="response-digest",
+            conclusive=True,
+        )
+
+
+class ViolationCountingReviewer:
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def review(self, task: ReviewTask) -> CompletedReview:
+        self.call_count += 1
+        return CompletedReview(
+            identity=task.identity,
+            completed_at=datetime(2026, 8, 25, 10, self.call_count, tzinfo=UTC),
+            verdict={
+                "decision": "violation",
+                "confidence": 0.9,
+                "violations": [],
+                "summary": "Violation found.",
+                "requires_human_review": True,
+            },
+            model_response_digest="same-response-digest",
             conclusive=True,
         )

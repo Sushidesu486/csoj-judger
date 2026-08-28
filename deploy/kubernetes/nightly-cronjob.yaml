@@ -1,0 +1,70 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: oj-checker-nightly-review
+  namespace: csoj-judger
+  labels:
+    app.kubernetes.io/name: oj-checker
+    app.kubernetes.io/component: nightly-review
+spec:
+  schedule: "0 2 * * *"
+  timeZone: Asia/Shanghai
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 7
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 21600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: oj-checker
+            app.kubernetes.io/component: nightly-review
+        spec:
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: nightly-review
+              image: harbor.clusters.zjusct.io/library/oj-checker:REQUIRED_AT_DEPLOY_TIME
+              args: ["nightly"]
+              env:
+                - name: DB_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: oj-audit-db-ro
+                      key: url
+                - name: REPORT_API_URL
+                  value: http://oj-checker-report-api.csoj-judger.svc.cluster.local:8080
+                - name: REPORT_API_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: oj-checker-report-api
+                      key: token
+                - name: HPC101_REVISION
+                  value: c12aaa26a346fd3fd8a39eceb3ac355ba14d19b0
+                - name: PGOPTIONS
+                  value: >-
+                    -c default_transaction_read_only=on
+                    -c statement_timeout=30000
+                    -c lock_timeout=1000
+                    -c idle_in_transaction_session_timeout=30000
+                    -c application_name=oj-checker-nightly
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi

@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 from oj_checker.catalog import InMemorySubmissionCatalog
 from oj_checker.domain import SelectionPolicy, SnapshotRequest, Submission
+from oj_checker.postgres_catalog import PostgresSubmissionCatalog
 
 
 def test_snapshot_keeps_history_only_for_plagiarism_corpus() -> None:
@@ -70,6 +71,24 @@ def test_snapshot_can_select_one_submission() -> None:
     )
 
     assert [item.id for item in snapshot.submissions] == ["alice-old"]
+
+
+def test_postgres_best_snapshot_uses_authoritative_score_table() -> None:
+    query, parameters = PostgresSubmissionCatalog._query(
+        SnapshotRequest(
+            SelectionPolicy.BEST_PER_OWNER_LAB,
+            cutoff=datetime(2026, 8, 22, tzinfo=UTC),
+            min_score=0,
+            limit=12,
+        )
+    )
+
+    assert "FROM oj_user_lab_best_scores b" in query
+    assert "JOIN oj_submissions s ON s.id = b.submission_id" in query
+    assert "JOIN oj_submission_runs r ON r.id = b.submission_run_id" in query
+    assert "b.score AS score" in query
+    assert query.rstrip().endswith("LIMIT %s")
+    assert parameters[-1] == 12
 
 
 def submission(

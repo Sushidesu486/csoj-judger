@@ -5,7 +5,6 @@ import psycopg
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
 
-from oj_checker.catalog import best_per_owner_lab
 from oj_checker.domain import SelectionPolicy, SnapshotRequest, Submission, SubmissionSnapshot
 
 _READ_ONLY_OPTIONS = " ".join(
@@ -41,18 +40,19 @@ class PostgresSubmissionCatalog:
                 rows = connection.execute(*self._query(request)).fetchall()
 
         submissions = tuple(self._submission_from_row(row) for row in rows)
-        if request.policy is SelectionPolicy.BEST_PER_OWNER_LAB:
-            submissions = best_per_owner_lab(submissions)
-            if request.limit is not None:
-                submissions = submissions[: request.limit]
         return SubmissionSnapshot(request.policy, request.cutoff, submissions)
 
     @staticmethod
     def _query(request: SnapshotRequest) -> tuple[str, Sequence[Any]]:
+        score_column = (
+            "b.score"
+            if request.policy is SelectionPolicy.BEST_PER_OWNER_LAB
+            else "s.score"
+        )
         conditions = [
             "s.status = %s",
             "s.is_valid = true",
-            "s.score >= %s",
+            f"{score_column} >= %s",
             "s.submitted_at <= %s",
         ]
         parameters: list[Any] = ["Success", request.min_score, request.cutoff]
@@ -68,35 +68,49 @@ class PostgresSubmissionCatalog:
             parameters.append(list(request.submission_ids))
 
         where_clause = " AND ".join(conditions)
-        columns = """
+        active_run_column = (
+            "b.submission_run_id"
+            if request.policy is SelectionPolicy.BEST_PER_OWNER_LAB
+            else "s.active_result_run_id"
+        )
+        columns = f"""
             s.id::text AS id,
             s.owner,
             s.lab_id,
-            s.score,
+            {score_column} AS score,
             s.input_digest,
             s.submitted_at,
-            COALESCE(s.input_manifest, '{}'::jsonb) AS input_manifest,
-            COALESCE(r.lab_definition, '{}'::jsonb) AS lab_definition,
-            s.active_result_run_id AS active_run_id,
+            COALESCE(s.input_manifest, '{{}}'::jsonb) AS input_manifest,
+            COALESCE(r.lab_definition, '{{}}'::jsonb) AS lab_definition,
+            {active_run_column} AS active_run_id,
             r.state AS run_state,
-            COALESCE(r.result_info, '{}'::jsonb) AS run_result_info,
+            COALESCE(r.result_info, '{{}}'::jsonb) AS run_result_info,
             r.failure_class AS run_failure_class,
             r.failure_reason AS run_failure_reason,
             r.score AS run_score,
             r.performance AS run_performance,
             r.finished_at AS run_finished_at
         """
-        join = "LEFT JOIN oj_submission_runs r ON r.id = s.active_result_run_id"
+        if request.policy is SelectionPolicy.BEST_PER_OWNER_LAB:
+            source = """
+                FROM oj_user_lab_best_scores b
+                JOIN oj_submissions s ON s.id = b.submission_id
+                JOIN oj_submission_runs r ON r.id = b.submission_run_id
+            """
+        else:
+            source = """
+                FROM oj_submissions s
+                LEFT JOIN oj_submission_runs r ON r.id = s.active_result_run_id
+            """
 
         query = f"""
             SELECT {columns}
-            FROM oj_submissions s
-            {join}
+            {source}
             WHERE {where_clause}
             ORDER BY s.owner, s.lab_id, s.submitted_at, s.id
         """
 
-        if request.limit is not None and request.policy is SelectionPolicy.ALL_QUALIFYING:
+        if request.limit is not None:
             query += " LIMIT %s"
             parameters.append(request.limit)
 
