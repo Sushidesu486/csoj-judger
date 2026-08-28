@@ -2,7 +2,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -81,6 +81,7 @@ class CompletedReview:
     verdict: Mapping[str, Any]
     model_response_digest: str
     conclusive: bool
+    evidence: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.completed_at.tzinfo is None or self.completed_at.utcoffset() is None:
@@ -95,6 +96,7 @@ class CompletedReview:
             "verdict": dict(self.verdict),
             "model_response_digest": self.model_response_digest,
             "conclusive": self.conclusive,
+            "evidence": dict(self.evidence),
         }
 
 
@@ -127,12 +129,16 @@ class FileReviewLedger:
         response_digest = stored.get("model_response_digest")
         if not isinstance(response_digest, str):
             raise RuntimeError(f"review ledger response digest is malformed for {identity.key}")
+        evidence = stored.get("evidence", {})
+        if not isinstance(evidence, dict):
+            raise RuntimeError(f"review ledger evidence is malformed for {identity.key}")
         return CompletedReview(
             identity=identity,
             completed_at=completed_at,
             verdict=verdict,
             model_response_digest=response_digest,
             conclusive=True,
+            evidence=evidence,
         )
 
     def record(self, review: CompletedReview) -> Path:

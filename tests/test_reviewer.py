@@ -1,3 +1,4 @@
+import json
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -14,9 +15,15 @@ from oj_checker.reviewer import (
     PlagiarismReviewTask,
     ReviewParseError,
     TransientReviewError,
+    _compliance_messages,
 )
-from oj_checker.similarity import BaselineDelta, BaselineDeltaFile, SimilaritySignal
-from oj_checker.submission_store import SourceBundle
+from oj_checker.similarity import (
+    BaselineDelta,
+    BaselineDeltaFile,
+    BaselineDeltaHunk,
+    SimilaritySignal,
+)
+from oj_checker.submission_store import SourceBundle, SourceFile
 
 
 def test_compliance_review_retries_and_parses_reasoning_content() -> None:
@@ -229,6 +236,88 @@ def test_compliance_review_keeps_the_complete_current_lab2_document() -> None:
 
     assert result.conclusive
     assert large_document in client.messages[0][1].content
+
+
+def test_compliance_prompt_uses_hunks_and_does_not_duplicate_changed_sources() -> None:
+    task = compliance_task()
+    task = replace(
+        task,
+        source_bundle=SourceBundle(
+            "submission-a",
+            (
+                SourceFile(
+                    path="CMakeLists.txt",
+                    declared_bytes=20,
+                    declared_sha256=None,
+                    content="add_executable(app main.cpp)\n",
+                    bytes_read=29,
+                    omission_reason=None,
+                ),
+                SourceFile(
+                    path="src/TwoPunctures.C",
+                    declared_bytes=1_000,
+                    declared_sha256=None,
+                    content="changed source\n",
+                    bytes_read=15,
+                    omission_reason=None,
+                ),
+            ),
+            total_bytes_read=44,
+        ),
+        delta=replace(
+            task.delta,
+            files=(
+                BaselineDeltaFile(
+                    path="src/TwoPunctures.C",
+                    added_text="changed source\n",
+                    removed_text="old source\n",
+                    hunks=(
+                        BaselineDeltaHunk(
+                            old_start=10,
+                            old_count=1,
+                            new_start=10,
+                            new_count=1,
+                            lines="-old source\n+changed source\n",
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    messages, incomplete, diagnostics = _compliance_messages(task, 240_000)
+    payload = json.loads(messages[1].content.split("\nEvidence:\n", 1)[1])
+
+    assert not incomplete
+    assert diagnostics["baseline_delta"]["hunk_count"] == 1
+    assert payload["baseline_delta"]["files"][0]["hunks"][0]["old_start"] == 10
+    assert "+changed source" in payload["baseline_delta"]["files"][0]["hunks"][0]["text"]["text"]
+    assert [file["path"] for file in payload["source_context"]["files"]] == [
+        "CMakeLists.txt"
+    ]
+    assert payload["source_context"]["files"][0]["content"]["truncated"] is False
+
+
+def test_compliance_prompt_records_truncation_metadata() -> None:
+    task = replace(
+        compliance_task(),
+        identity=replace(
+            compliance_task().identity,
+            task_parameters=(
+                ("prompt_evidence_chars", 80),
+            ),
+        ),
+    )
+
+    messages, incomplete, diagnostics = _compliance_messages(task, 80)
+    payload = json.loads(messages[1].content.split("\nEvidence:\n", 1)[1])
+    text = payload["baseline_delta"]["files"][0]["hunks"][0]["text"]
+
+    assert incomplete
+    assert diagnostics["baseline_delta"]["truncated_file_count"] == 1
+    assert text["truncated"] is True
+    assert text["original_chars"] > text["included_chars"]
+    assert text["truncation_reason"] == "delta_hunk_budget"
 
 
 class ScriptedChatClient:

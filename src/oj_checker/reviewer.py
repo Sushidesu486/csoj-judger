@@ -2,7 +2,7 @@ import hashlib
 import json
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -14,7 +14,12 @@ from oj_checker.review_ledger import (
     ReviewIdentity,
     ReviewTaskType,
 )
-from oj_checker.similarity import BaselineDelta, SimilaritySignal
+from oj_checker.similarity import (
+    BaselineDelta,
+    BaselineDeltaFile,
+    BaselineDeltaHunk,
+    SimilaritySignal,
+)
 from oj_checker.submission_store import SourceBundle
 
 
@@ -110,7 +115,7 @@ class OpenAICompatibleReviewer:
         self._max_attempts = max_attempts
 
     def review(self, task: ReviewTask) -> CompletedReview:
-        messages, prompt_evidence_incomplete = _messages(
+        messages, prompt_evidence_incomplete, evidence = _messages(
             task,
             _prompt_evidence_chars(task.identity),
         )
@@ -136,6 +141,7 @@ class OpenAICompatibleReviewer:
                     verdict=verdict,
                     model_response_digest=hashlib.sha256(raw_response.encode()).hexdigest(),
                     conclusive=verdict["decision"] != "inconclusive",
+                    evidence=evidence,
                 )
             except TransientReviewError as current_error:
                 error = current_error
@@ -230,7 +236,7 @@ def _append_text(output: list[str], value: object) -> None:
 def _messages(
     task: ReviewTask,
     max_evidence_chars: int,
-) -> tuple[tuple[ChatMessage, ...], bool]:
+) -> tuple[tuple[ChatMessage, ...], bool, dict[str, Any]]:
     if isinstance(task, ComplianceReviewTask):
         return _compliance_messages(task, max_evidence_chars)
     return _plagiarism_messages(task, max_evidence_chars)
@@ -246,7 +252,7 @@ def _prompt_evidence_chars(identity: ReviewIdentity) -> int:
 def _compliance_messages(
     task: ComplianceReviewTask,
     max_evidence_chars: int,
-) -> tuple[tuple[ChatMessage, ...], bool]:
+) -> tuple[tuple[ChatMessage, ...], bool, dict[str, Any]]:
     lab_definition_json = json.dumps(
         task.lab_definition,
         ensure_ascii=False,
@@ -276,16 +282,21 @@ def _compliance_messages(
             "upstream_commit": task.basis.upstream_commit,
             "source_path": task.basis.source_path,
             "document_path": task.basis.document_path,
-            "experiment_document": _bounded_text(task.basis.document, document_budget),
+            "experiment_document": _bounded_text(
+                task.basis.document,
+                document_budget,
+                reason="document_budget",
+            ),
             "frozen_lab_definition_json": _bounded_text(
                 lab_definition_json,
                 lab_definition_budget,
+                reason="lab_definition_budget",
             ),
         },
-        "baseline_delta": _delta_payload(task.delta, delta_budget),
+        "baseline_delta": _delta_payload(task.delta, delta_budget, include_hunks=True),
         "source_context": _source_payload(
             task.source_bundle,
-            {file.path for file in task.delta.files},
+            set(),
             source_context_budget,
         ),
     }
@@ -312,7 +323,13 @@ def _compliance_messages(
             "never a disciplinary action. Mark inconclusive when evidence is insufficient or the "
             "baseline delta or prompt evidence is marked incomplete. Write every human-readable "
             "summary and evidence description in Simplified Chinese. Keep JSON keys, enum values, "
-            "identifiers, and file paths exactly as specified.",
+            "identifiers, and file paths exactly as specified. The baseline_delta hunks use "
+            "unified-diff lines: a leading '-' is baseline-only, '+' is submission-only, and "
+            "' ' is unchanged context. source_context intentionally contains only execution "
+            "files when changed hunks already cover the other files. If any required hunk text "
+            "is truncated, mark the decision inconclusive. Files marked as artifacts (for example "
+            ".orig or .bak) are not automatically part of the build, but their presence and path "
+            "must still be considered.",
         ),
         ChatMessage(
             "user",
@@ -328,13 +345,19 @@ def _compliance_messages(
         "review_basis": payload["review_basis"],
         "baseline_delta": payload["baseline_delta"],
     }
-    return messages, _contains_truncation(critical_evidence)
+    incomplete = _contains_truncation(critical_evidence)
+    return messages, incomplete, _compliance_evidence_diagnostics(
+        task,
+        payload,
+        messages,
+        incomplete,
+    )
 
 
 def _plagiarism_messages(
     task: PlagiarismReviewTask,
     max_evidence_chars: int,
-) -> tuple[tuple[ChatMessage, ...], bool]:
+) -> tuple[tuple[ChatMessage, ...], bool, dict[str, Any]]:
     delta_budget = max(1, max_evidence_chars // 2)
     payload = {
         "task": "plagiarism_adjudication",
@@ -392,27 +415,86 @@ def _plagiarism_messages(
             + json.dumps(payload, ensure_ascii=False, sort_keys=True),
         ),
     )
-    return messages, _contains_truncation(payload)
+    incomplete = _contains_truncation(payload)
+    return messages, incomplete, {
+        "kind": "plagiarism",
+        "prompt_evidence_chars": max_evidence_chars,
+        "prompt_chars": sum(len(message.content) for message in messages),
+        "incomplete": incomplete,
+    }
 
 
-def _delta_payload(delta: BaselineDelta, max_chars: int) -> dict[str, Any]:
-    files = []
-    per_file_budget = max(1, max_chars // max(1, len(delta.files)))
+def _delta_payload(
+    delta: BaselineDelta,
+    max_chars: int,
+    *,
+    include_hunks: bool = False,
+) -> dict[str, Any]:
+    budgets = _allocate_budgets(
+        [
+            (
+                file.path,
+                max(
+                    sum(len(hunk.lines) for hunk in _hunks_for_file(file)),
+                    1,
+                ),
+                _evidence_priority(file.path),
+            )
+            for file in delta.files
+        ],
+        max_chars,
+    )
+    files: list[dict[str, Any]] = []
     for file in delta.files:
+        file_budget = budgets.get(file.path, 1)
+        if include_hunks:
+            hunks = _hunks_for_file(file)
+            hunk_budgets = _allocate_budgets(
+                [
+                    (str(index), max(len(hunk.lines), 1), 1)
+                    for index, hunk in enumerate(hunks)
+                ],
+                file_budget,
+            )
+            files.append(
+                {
+                    "path": file.path,
+                    "artifact": _artifact_kind(file.path),
+                    "added_chars": len(file.added_text),
+                    "removed_chars": len(file.removed_text),
+                    "hunks": [
+                        {
+                            "old_start": hunk.old_start,
+                            "old_count": hunk.old_count,
+                            "new_start": hunk.new_start,
+                            "new_count": hunk.new_count,
+                            "text": _bounded_text(
+                                hunk.lines,
+                                hunk_budgets.get(str(index), 1),
+                                reason="delta_hunk_budget",
+                            ),
+                        }
+                        for index, hunk in enumerate(hunks)
+                    ],
+                }
+            )
+            continue
+
         if file.added_text and file.removed_text:
-            added_budget = max(1, per_file_budget // 2)
-            removed_budget = max(1, per_file_budget - added_budget)
+            added_budget = max(1, file_budget // 2)
+            removed_budget = max(1, file_budget - added_budget)
         elif file.added_text:
-            added_budget = per_file_budget
+            added_budget = file_budget
             removed_budget = 1
         else:
             added_budget = 1
-            removed_budget = per_file_budget
-        added = _bounded_text(file.added_text, added_budget)
-        removed = _bounded_text(file.removed_text, removed_budget)
+            removed_budget = file_budget
+        added = _bounded_text(file.added_text, added_budget, reason="delta_budget")
+        removed = _bounded_text(file.removed_text, removed_budget, reason="delta_budget")
         files.append(
             {
                 "path": file.path,
+                "artifact": _artifact_kind(file.path),
                 "added_text": added,
                 "removed_text": removed,
             }
@@ -436,33 +518,160 @@ def _source_payload(
         for file in bundle.files
         if file.path in changed_paths or file.path.rsplit("/", 1)[-1] in execution_names
     ]
-    files = []
-    per_file_budget = max(1, max_chars // max(1, len(selected)))
+    budgets = _allocate_budgets(
+        [
+            (file.path, max(len(file.content), 1), _evidence_priority(file.path))
+            for file in selected
+        ],
+        max_chars,
+    )
+    files: list[dict[str, Any]] = []
     for file in selected:
-        content = _bounded_text(file.content, per_file_budget)
+        content = _bounded_text(
+            file.content,
+            budgets.get(file.path, 1),
+            reason="source_context_budget",
+        )
         files.append(
             {
                 "path": file.path,
+                "artifact": _artifact_kind(file.path),
                 "content": content,
                 "input_truncated": file.truncated,
+                "declared_bytes": file.declared_bytes,
+                "bytes_read": file.bytes_read,
+                "omission_reason": file.omission_reason,
             }
         )
     return {
         "files": files,
         "omitted_file_count": 0,
+        "omitted_unchanged_file_count": max(0, len(bundle.files) - len(selected)),
+        "selection_mode": "execution_files_only_when_delta_is_present",
         "declared_paths": list(bundle.declared_paths),
         "required_patterns": list(bundle.required_patterns),
         "allowed_patterns": list(bundle.allowed_patterns),
     }
 
 
-def _bounded_text(value: str, max_chars: int) -> dict[str, Any]:
+def _compliance_evidence_diagnostics(
+    task: ComplianceReviewTask,
+    payload: Mapping[str, Any],
+    messages: tuple[ChatMessage, ...],
+    incomplete: bool,
+) -> dict[str, Any]:
+    delta_files = payload["baseline_delta"]["files"]
+    source_files = payload["source_context"]["files"]
+    return {
+        "kind": "compliance",
+        "prompt_evidence_chars": dict(task.identity.task_parameters)["prompt_evidence_chars"],
+        "prompt_chars": sum(len(message.content) for message in messages),
+        "incomplete": incomplete,
+        "source_bundle": {
+            "file_count": len(task.source_bundle.files),
+            "bytes_read": task.source_bundle.total_bytes_read,
+            "truncated_file_count": sum(file.truncated for file in task.source_bundle.files),
+        },
+        "baseline_delta": {
+            "file_count": len(task.delta.files),
+            "hunk_count": sum(len(_hunks_for_file(file)) for file in task.delta.files),
+            "truncated_file_count": sum(
+                any(hunk["text"].get("truncated") is True for hunk in file["hunks"])
+                for file in delta_files
+            ),
+        },
+        "source_context": {
+            "file_count": len(source_files),
+            "truncated_file_count": sum(
+                file["content"].get("truncated") is True for file in source_files
+            ),
+            "omitted_unchanged_file_count": payload["source_context"].get(
+                "omitted_unchanged_file_count", 0
+            ),
+        },
+    }
+
+
+def _bounded_text(value: str, max_chars: int, *, reason: str) -> dict[str, Any]:
+    max_chars = max(1, max_chars)
     truncated = len(value) > max_chars
     return {
         "text": value[:max_chars],
         "truncated": truncated,
+        "original_chars": len(value),
+        "included_chars": min(len(value), max_chars),
+        "truncation_reason": reason if truncated else None,
         "sha256": hashlib.sha256(value.encode()).hexdigest(),
     }
+
+
+def _hunks_for_file(file: BaselineDeltaFile) -> tuple[BaselineDeltaHunk, ...]:
+    return file.hunks or _fallback_hunks(file)
+
+
+def _fallback_hunks(file: BaselineDeltaFile) -> tuple[BaselineDeltaHunk, ...]:
+    lines: list[str] = []
+    lines.extend(f"-{line}" for line in file.removed_text.splitlines(keepends=True))
+    lines.extend(f"+{line}" for line in file.added_text.splitlines(keepends=True))
+    return (
+        BaselineDeltaHunk(
+            old_start=1,
+            old_count=len(file.removed_text.splitlines()),
+            new_start=1,
+            new_count=len(file.added_text.splitlines()),
+            lines="".join(lines),
+        ),
+    )
+
+
+def _evidence_priority(path: str) -> int:
+    name = path.rsplit("/", 1)[-1]
+    if name in {"CMakeLists.txt", "Makefile", "makefile", "compile.sh", "run.sh"}:
+        return 4
+    if _artifact_kind(path) is not None:
+        return 1
+    return 2
+
+
+def _artifact_kind(path: str) -> str | None:
+    name = path.rsplit("/", 1)[-1]
+    for suffix in (".orig", ".bak", ".rej", ".swp"):
+        if name.endswith(suffix):
+            return suffix.removeprefix(".")
+    return None
+
+
+def _allocate_budgets(
+    items: Sequence[tuple[str, int, int]],
+    max_chars: int,
+) -> dict[str, int]:
+    if not items:
+        return {}
+    max_chars = max(1, max_chars)
+    weights = {
+        key: max(size, 1) * max(priority, 1)
+        for key, size, priority in items
+    }
+    total_weight = sum(weights.values())
+    budgets = {
+        key: min(size, max(1, max_chars * weights[key] // total_weight))
+        for key, size, _ in items
+    }
+    remaining = max_chars - sum(budgets.values())
+    ordered = sorted(items, key=lambda item: (-item[2], -item[1], item[0]))
+    while remaining > 0:
+        progressed = False
+        for key, size, _ in ordered:
+            if budgets[key] >= size:
+                continue
+            budgets[key] += 1
+            remaining -= 1
+            progressed = True
+            if remaining == 0:
+                break
+        if not progressed:
+            break
+    return budgets
 
 
 def _contains_truncation(value: object) -> bool:

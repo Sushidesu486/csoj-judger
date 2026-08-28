@@ -121,6 +121,9 @@ class FileComplianceReportReader:
             return None
         if not isinstance(decision, str) or decision not in _COMPLIANCE_DECISIONS:
             return None
+        evidence = review.get("evidence", {})
+        if not isinstance(evidence, dict):
+            evidence = {}
         try:
             parsed_completed_at = datetime.fromisoformat(completed_at)
         except ValueError:
@@ -154,6 +157,7 @@ class FileComplianceReportReader:
             "confidence": verdict.get("confidence"),
             "summary": verdict.get("summary", ""),
             "violations": verdict.get("violations", []),
+            "evidence": evidence,
             "provenance": {
                 "review_key": review_key,
                 "completed_at": completed_at,

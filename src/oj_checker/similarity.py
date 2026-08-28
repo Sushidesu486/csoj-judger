@@ -15,10 +15,20 @@ from oj_checker.submission_store import SourceBundle, matches_submission_pattern
 
 
 @dataclass(frozen=True, slots=True)
+class BaselineDeltaHunk:
+    old_start: int
+    old_count: int
+    new_start: int
+    new_count: int
+    lines: str
+
+
+@dataclass(frozen=True, slots=True)
 class BaselineDeltaFile:
     path: str
     added_text: str
     removed_text: str
+    hunks: tuple[BaselineDeltaHunk, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,13 +49,14 @@ class BaselineDeltaBuilder:
             baseline = baseline_by_path.get(source_file.path, "")
             if source_file.content == baseline:
                 continue
-            added, removed = _changed_lines(baseline, source_file.content)
+            added, removed, hunks = _changed_lines(baseline, source_file.content)
             if added or removed:
                 delta_files.append(
                     BaselineDeltaFile(
                         path=source_file.path,
                         added_text=added,
                         removed_text=removed,
+                        hunks=hunks,
                     )
                 )
         source_paths = {file.path for file in bundle.files}
@@ -56,11 +67,13 @@ class BaselineDeltaBuilder:
                 matches_submission_pattern(baseline_file.path, pattern)
                 for pattern in (*bundle.required_patterns, *bundle.allowed_patterns)
             ):
+                _, removed, hunks = _changed_lines(baseline_file.text(), "")
                 delta_files.append(
                     BaselineDeltaFile(
                         path=baseline_file.path,
                         added_text="",
-                        removed_text=baseline_file.text(),
+                        removed_text=removed,
+                        hunks=hunks,
                     )
                 )
         delta_files.sort(key=lambda file: file.path)
@@ -308,18 +321,55 @@ class SimilarityDetector:
                     )
 
 
-def _changed_lines(baseline: str, submitted: str) -> tuple[str, str]:
-    baseline_lines = baseline.splitlines(keepends=True)
-    submitted_lines = submitted.splitlines(keepends=True)
+def _changed_lines(
+    baseline: str,
+    submitted: str,
+) -> tuple[str, str, tuple[BaselineDeltaHunk, ...]]:
+    baseline_lines = _normalize_newlines(baseline).splitlines(keepends=True)
+    submitted_lines = _normalize_newlines(submitted).splitlines(keepends=True)
     matcher = SequenceMatcher(None, baseline_lines, submitted_lines, autojunk=False)
     added: list[str] = []
     removed: list[str] = []
-    for tag, baseline_start, baseline_end, submitted_start, submitted_end in matcher.get_opcodes():
-        if tag in {"replace", "insert"}:
+    for (
+        operation,
+        baseline_start,
+        baseline_end,
+        submitted_start,
+        submitted_end,
+    ) in matcher.get_opcodes():
+        if operation in {"replace", "insert"}:
             added.extend(submitted_lines[submitted_start:submitted_end])
-        if tag in {"replace", "delete"}:
+        if operation in {"replace", "delete"}:
             removed.extend(baseline_lines[baseline_start:baseline_end])
-    return "".join(added), "".join(removed)
+    hunks = []
+    for group in matcher.get_grouped_opcodes(3):
+        first = group[0]
+        last = group[-1]
+        lines: list[str] = []
+        for operation2, baseline_start, baseline_end, submitted_start, submitted_end in group:
+            if operation2 == "equal":
+                lines.extend(f" {line}" for line in baseline_lines[baseline_start:baseline_end])
+            elif operation2 == "delete":
+                lines.extend(f"-{line}" for line in baseline_lines[baseline_start:baseline_end])
+            elif operation2 == "insert":
+                lines.extend(f"+{line}" for line in submitted_lines[submitted_start:submitted_end])
+            else:
+                lines.extend(f"-{line}" for line in baseline_lines[baseline_start:baseline_end])
+                lines.extend(f"+{line}" for line in submitted_lines[submitted_start:submitted_end])
+        hunks.append(
+            BaselineDeltaHunk(
+                old_start=first[1] + 1,
+                old_count=last[2] - first[1],
+                new_start=first[3] + 1,
+                new_count=last[4] - first[3],
+                lines="".join(lines),
+            )
+        )
+    return "".join(added), "".join(removed), tuple(hunks)
+
+
+def _normalize_newlines(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _delta_digest(files: tuple[BaselineDeltaFile, ...]) -> str:

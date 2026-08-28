@@ -60,7 +60,7 @@ class ReviewPipeline:
     plagiarism_prompt_version: str = "plagiarism-v1"
     plagiarism_schema_version: str = "plagiarism-result-v1"
     source_policy_version: str = "source-bundle-v1"
-    delta_version: str = "line-delta-v1"
+    delta_version: str = "line-delta-v2"
     similarity_version: str = "minhash-lsh-v1"
     prompt_evidence_chars: int = 240_000
     near_identical_threshold: float = 0.95

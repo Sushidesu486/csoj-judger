@@ -42,6 +42,10 @@ def write_report(root, *, decision="violation", completed_at="2026-08-25T12:37:0
                             else [{"category": "baseline_degradation"}]
                         ),
                     },
+                    "evidence": {
+                        "incomplete": decision == "inconclusive",
+                        "baseline_delta": {"truncated_file_count": 2},
+                    },
                 },
             }
         )
@@ -66,6 +70,10 @@ def test_reader_returns_normalized_single_submission_report(tmp_path) -> None:
     assert report["decision"] == "violation"
     assert report["compliant"] is False
     assert report["violations"] == [{"category": "baseline_degradation"}]
+    assert report["evidence"] == {
+        "incomplete": False,
+        "baseline_delta": {"truncated_file_count": 2},
+    }
 
 
 def test_reader_ignores_unknown_decision_reports(tmp_path) -> None:

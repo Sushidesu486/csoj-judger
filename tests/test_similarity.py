@@ -38,6 +38,21 @@ def test_baseline_delta_keeps_only_real_student_changes() -> None:
     assert delta.files[0].removed_text == "  return 1;\n"
     assert delta.files[1].added_text == "__global__ void solve() {}\n"
     assert delta.files[1].removed_text == ""
+    assert len(delta.files[0].hunks) == 1
+    assert delta.files[0].hunks[0].old_start == 1
+    assert delta.files[0].hunks[0].new_start == 1
+    assert "-  return 1;" in delta.files[0].hunks[0].lines
+    assert "+  return 42;" in delta.files[0].hunks[0].lines
+    assert not delta.incomplete
+
+
+def test_baseline_delta_ignores_line_ending_only_changes() -> None:
+    basis = review_basis({"src/kernel.cpp": "int answer() {\r\n  return 1;\r\n}\r\n"})
+    bundle = source_bundle({"src/kernel.cpp": "int answer() {\n  return 1;\n}\n"})
+
+    delta = BaselineDeltaBuilder().build(bundle, basis)
+
+    assert delta.files == ()
     assert not delta.incomplete
 
 
