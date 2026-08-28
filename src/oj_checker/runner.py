@@ -65,7 +65,9 @@ class ReviewPipeline:
     prompt_evidence_chars: int = 240_000
     near_identical_threshold: float = 0.95
     compliance_review_strategy: str = "chunked-v1"
-    review_chunk_chars: int = 420_000
+    # Source code has a high token/character ratio; keep serialized chunks
+    # conservative for an upstream model with a 200k-token context window.
+    review_chunk_chars: int = 180_000
 
     def __post_init__(self) -> None:
         if tuple(sorted(self.model_parameters)) != self.model_parameters:

@@ -180,6 +180,7 @@ class OpenAICompatibleReviewer:
                     {
                         "chunk_index": index,
                         "error_type": type(error).__name__,
+                        "error": str(error),
                     }
                 )
 
@@ -323,7 +324,7 @@ def _review_strategy(identity: ReviewIdentity) -> str:
 
 
 def _review_chunk_chars(identity: ReviewIdentity) -> int:
-    value = dict(identity.task_parameters).get("review_chunk_chars", 420_000)
+    value = dict(identity.task_parameters).get("review_chunk_chars", 180_000)
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError("review identity requires a positive review_chunk_chars parameter")
     return value

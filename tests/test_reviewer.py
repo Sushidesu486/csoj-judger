@@ -16,6 +16,7 @@ from oj_checker.reviewer import (
     ReviewParseError,
     TransientReviewError,
     _compliance_messages,
+    _review_chunk_chars,
 )
 from oj_checker.similarity import (
     BaselineDelta,
@@ -381,6 +382,12 @@ def test_chunked_compliance_review_covers_all_hunks_without_truncation() -> None
         "truncated" not in message.content
         for messages in client.messages
         for message in messages
+    )
+
+
+def test_chunked_review_uses_conservative_default_context_budget() -> None:
+    assert _review_chunk_chars(identity("compliance", "compliance-v3", "compliance-result-v1")) == (
+        180_000
     )
 
 
