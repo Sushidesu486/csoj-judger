@@ -320,6 +320,70 @@ def test_compliance_prompt_records_truncation_metadata() -> None:
     assert text["truncation_reason"] == "delta_hunk_budget"
 
 
+def test_chunked_compliance_review_covers_all_hunks_without_truncation() -> None:
+    task = compliance_task()
+    task = replace(
+        task,
+        identity=replace(
+            task.identity,
+            task_parameters=(
+                ("review_chunk_chars", 20_000),
+                ("review_strategy", "chunked-v1"),
+            ),
+        ),
+        delta=replace(
+            task.delta,
+            files=tuple(
+                BaselineDeltaFile(
+                    path=f"src/part-{index}.cpp",
+                    added_text="x" * 12_000,
+                    removed_text="y" * 12_000,
+                    hunks=(
+                        BaselineDeltaHunk(
+                            old_start=1,
+                            old_count=1,
+                            new_start=1,
+                            new_count=1,
+                            lines=("-" + "y" * 6_000 + "\n" + "+" + "x" * 6_000 + "\n"),
+                        ),
+                    ),
+                )
+                for index in range(3)
+            ),
+        ),
+    )
+    response = ModelReply(
+        content=(
+            '{"decision":"compliant","confidence":0.9,"violations":[],'
+            '"summary":"未发现违规。","requires_human_review":true}'
+        ),
+        reasoning_content=None,
+    )
+    client = ScriptedChatClient([response] * 10)
+
+    result = OpenAICompatibleReviewer(
+        client,
+        clock=lambda: datetime(2026, 8, 28, 10, 0, tzinfo=UTC),
+        max_attempts=1,
+    ).review(task)
+
+    assert result.conclusive
+    assert result.verdict["decision"] == "compliant"
+    assert client.call_count > 1
+    assert result.evidence["review_strategy"] == "chunked-v1"
+    assert result.evidence["chunk_count"] == client.call_count
+    assert result.evidence["completed_chunk_count"] == client.call_count
+    assert result.evidence["failed_chunk_count"] == 0
+    assert result.evidence["baseline_delta"]["covered_file_count"] == 3
+    assert result.evidence["baseline_delta"]["covered_hunk_count"] == 3
+    assert result.evidence["baseline_delta"]["truncated_hunk_count"] == 0
+    assert all(
+        "truncated" not in message.content
+        for messages in client.messages
+        for message in messages
+    )
+
+
 class ScriptedChatClient:
     def __init__(self, responses: list[Exception | ModelReply]) -> None:
         self._responses = responses

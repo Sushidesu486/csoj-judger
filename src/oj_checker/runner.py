@@ -55,7 +55,7 @@ class ReviewPipeline:
     ledger: ReviewLedger
     source_policy: SourcePolicy
     model_parameters: tuple[tuple[str, ModelParameter], ...]
-    compliance_prompt_version: str = "compliance-v2"
+    compliance_prompt_version: str = "compliance-v3"
     compliance_schema_version: str = "compliance-result-v1"
     plagiarism_prompt_version: str = "plagiarism-v1"
     plagiarism_schema_version: str = "plagiarism-result-v1"
@@ -64,12 +64,18 @@ class ReviewPipeline:
     similarity_version: str = "minhash-lsh-v1"
     prompt_evidence_chars: int = 240_000
     near_identical_threshold: float = 0.95
+    compliance_review_strategy: str = "chunked-v1"
+    review_chunk_chars: int = 420_000
 
     def __post_init__(self) -> None:
         if tuple(sorted(self.model_parameters)) != self.model_parameters:
             raise ValueError("model_parameters must be sorted")
         if self.prompt_evidence_chars <= 0:
             raise ValueError("prompt_evidence_chars must be positive")
+        if not self.compliance_review_strategy:
+            raise ValueError("compliance_review_strategy must not be empty")
+        if self.review_chunk_chars <= 0:
+            raise ValueError("review_chunk_chars must be positive")
         if not 0 <= self.near_identical_threshold <= 1:
             raise ValueError("near_identical_threshold must be between zero and one")
 
@@ -280,6 +286,8 @@ class AuditRunner:
             ],
             "model_parameters": dict(pipeline.model_parameters),
             "prompt_evidence_chars": pipeline.prompt_evidence_chars,
+            "review_strategy": pipeline.compliance_review_strategy,
+            "review_chunk_chars": pipeline.review_chunk_chars,
             "near_identical_threshold": pipeline.near_identical_threshold,
         }
         if request.submission_id:
@@ -480,6 +488,8 @@ class AuditRunner:
             "max_file_bytes": pipeline.source_policy.max_file_bytes,
             "max_total_bytes": pipeline.source_policy.max_total_bytes,
             "prompt_evidence_chars": pipeline.prompt_evidence_chars,
+            "review_strategy": pipeline.compliance_review_strategy,
+            "review_chunk_chars": pipeline.review_chunk_chars,
         }
         return ReviewIdentity(
             task_type=ReviewTaskType.COMPLIANCE,

@@ -13,7 +13,7 @@ from oj_checker.domain import SelectionPolicy, SnapshotRequest
 
 NIGHTLY_MODEL = "glm-5.3"
 RULES_VERSION = "audit-rules-v1"
-PROMPT_VERSION = "compliance-v2"
+PROMPT_VERSION = "compliance-v3"
 SCHEMA_VERSION = "compliance-result-v1"
 _MAX_RESPONSE_BYTES = 1 << 20
 
@@ -133,7 +133,7 @@ class HTTPComplianceClient:
         token: str,
         *,
         report_timeout_seconds: float = 10,
-        review_timeout_seconds: float = 400,
+        review_timeout_seconds: float = 3600,
     ) -> None:
         base_url = base_url.strip().rstrip("/")
         if not base_url.startswith(("http://", "https://")):

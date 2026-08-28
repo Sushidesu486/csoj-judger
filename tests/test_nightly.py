@@ -80,7 +80,7 @@ def report(
     *,
     decision: str,
     model: str = "glm-5.3",
-    prompt_version: str = "compliance-v2",
+    prompt_version: str = "compliance-v3",
 ) -> dict:
     return {
         "submission": {"id": submission_id},

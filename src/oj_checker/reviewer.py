@@ -115,6 +115,11 @@ class OpenAICompatibleReviewer:
         self._max_attempts = max_attempts
 
     def review(self, task: ReviewTask) -> CompletedReview:
+        if (
+            isinstance(task, ComplianceReviewTask)
+            and _review_strategy(task.identity) == "chunked-v1"
+        ):
+            return self._review_compliance_chunked(task)
         messages, prompt_evidence_incomplete, evidence = _messages(
             task,
             _prompt_evidence_chars(task.identity),
@@ -142,6 +147,76 @@ class OpenAICompatibleReviewer:
                     model_response_digest=hashlib.sha256(raw_response.encode()).hexdigest(),
                     conclusive=verdict["decision"] != "inconclusive",
                     evidence=evidence,
+                )
+            except TransientReviewError as current_error:
+                error = current_error
+        if error is None:
+            raise ReviewError("review failed without an error")
+        raise error
+
+    def _review_compliance_chunked(self, task: ComplianceReviewTask) -> CompletedReview:
+        chunks = _compliance_chunks(task, _review_chunk_chars(task.identity))
+        verdicts: list[dict[str, Any]] = []
+        raw_responses: list[str] = []
+        failures: list[dict[str, Any]] = []
+        request_chars: list[int] = []
+        for index, messages in enumerate(chunks):
+            request_chars.append(sum(len(message.content) for message in messages))
+            try:
+                reply = self._complete_with_retries(task.identity, messages)
+                raw_response = reply.content or reply.reasoning_content
+                if not raw_response:
+                    raise ReviewParseError("model returned no content or reasoning_content")
+                raw_responses.append(raw_response)
+                verdicts.append(
+                    _parse_verdict(
+                        raw_response,
+                        task,
+                        prompt_evidence_incomplete=task.delta.incomplete,
+                    )
+                )
+            except ReviewError as error:
+                failures.append(
+                    {
+                        "chunk_index": index,
+                        "error_type": type(error).__name__,
+                    }
+                )
+
+        verdict = _merge_compliance_verdicts(verdicts, len(chunks), len(failures))
+        evidence = _chunked_evidence_diagnostics(
+            task,
+            chunks,
+            request_chars,
+            len(verdicts),
+            failures,
+        )
+        if failures:
+            evidence["failed_chunks"] = failures
+        digest_input = "\n\n".join(raw_responses)
+        if failures:
+            digest_input += "\n" + json.dumps(failures, sort_keys=True)
+        return CompletedReview(
+            identity=task.identity,
+            completed_at=self._clock(),
+            verdict=verdict,
+            model_response_digest=hashlib.sha256(digest_input.encode()).hexdigest(),
+            conclusive=verdict["decision"] != "inconclusive",
+            evidence=evidence,
+        )
+
+    def _complete_with_retries(
+        self,
+        identity: ReviewIdentity,
+        messages: tuple[ChatMessage, ...],
+    ) -> ModelReply:
+        error: TransientReviewError | None = None
+        for _ in range(self._max_attempts):
+            try:
+                return self._client.complete(
+                    model=identity.model,
+                    messages=messages,
+                    parameters=dict(identity.model_parameters),
                 )
             except TransientReviewError as current_error:
                 error = current_error
@@ -240,6 +315,276 @@ def _messages(
     if isinstance(task, ComplianceReviewTask):
         return _compliance_messages(task, max_evidence_chars)
     return _plagiarism_messages(task, max_evidence_chars)
+
+
+def _review_strategy(identity: ReviewIdentity) -> str:
+    value = dict(identity.task_parameters).get("review_strategy")
+    return value if isinstance(value, str) else "bounded-v2"
+
+
+def _review_chunk_chars(identity: ReviewIdentity) -> int:
+    value = dict(identity.task_parameters).get("review_chunk_chars", 420_000)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("review identity requires a positive review_chunk_chars parameter")
+    return value
+
+
+def _compliance_chunks(
+    task: ComplianceReviewTask,
+    chunk_chars: int,
+) -> tuple[tuple[ChatMessage, ...], ...]:
+    items = _compliance_evidence_items(task)
+    chunks: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for item in items:
+        for part in _split_evidence_item(item, max(16_000, chunk_chars // 2)):
+            candidate = [*current, part]
+            if current and _chunk_prompt_chars(task, candidate, 1) > chunk_chars:
+                chunks.append(current)
+                current = [part]
+            else:
+                current = candidate
+    if current or not chunks:
+        chunks.append(current)
+
+    count = len(chunks)
+    return tuple(
+        _build_compliance_chunk_messages(task, evidence, index, count)
+        for index, evidence in enumerate(chunks)
+    )
+
+
+def _compliance_evidence_items(task: ComplianceReviewTask) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for file in task.delta.files:
+        for index, hunk in enumerate(_hunks_for_file(file)):
+            items.append(
+                {
+                    "kind": "delta_hunk",
+                    "path": file.path,
+                    "artifact": _artifact_kind(file.path),
+                    "hunk_index": index,
+                    "old_start": hunk.old_start,
+                    "old_count": hunk.old_count,
+                    "new_start": hunk.new_start,
+                    "new_count": hunk.new_count,
+                    "text": hunk.lines,
+                }
+            )
+    execution_names = {"CMakeLists.txt", "Makefile", "makefile", "compile.sh", "run.sh"}
+    for source_file in task.source_bundle.files:
+        if source_file.path.rsplit("/", 1)[-1] not in execution_names:
+            continue
+        items.append(
+            {
+                "kind": "execution_context",
+                "path": source_file.path,
+                "content": source_file.content,
+                "input_truncated": source_file.truncated,
+                "declared_bytes": source_file.declared_bytes,
+                "bytes_read": source_file.bytes_read,
+            }
+        )
+    return items
+
+
+def _split_evidence_item(item: dict[str, Any], max_text_chars: int) -> tuple[dict[str, Any], ...]:
+    text_key = "text" if "text" in item else "content"
+    value = item.get(text_key)
+    if not isinstance(value, str) or len(value) <= max_text_chars:
+        return (item,)
+    parts: list[dict[str, Any]] = []
+    total = (len(value) + max_text_chars - 1) // max_text_chars
+    for index in range(total):
+        start = index * max_text_chars
+        part = dict(item)
+        part[text_key] = value[start : start + max_text_chars]
+        part["part_index"] = index
+        part["part_count"] = total
+        parts.append(part)
+    return tuple(parts)
+
+
+def _chunk_prompt_chars(
+    task: ComplianceReviewTask,
+    evidence: list[dict[str, Any]],
+    index: int,
+) -> int:
+    return sum(len(message.content) for message in _build_compliance_chunk_messages(
+        task,
+        evidence,
+        index,
+        max(index + 1, 1),
+    ))
+
+
+def _build_compliance_chunk_messages(
+    task: ComplianceReviewTask,
+    evidence: list[dict[str, Any]],
+    index: int,
+    count: int,
+) -> tuple[ChatMessage, ...]:
+    lab_definition_json = json.dumps(task.lab_definition, ensure_ascii=False, sort_keys=True)
+    payload = {
+        "task": "compliance_review_chunk",
+        "chunk": {"index": index, "count": count},
+        "submission": {
+            "id": task.identity.submission_ids[0],
+            "owner": task.owner,
+            "lab_id": task.identity.lab_id,
+            "score": task.score,
+        },
+        "review_basis": {
+            "upstream_commit": task.basis.upstream_commit,
+            "source_path": task.basis.source_path,
+            "document_path": task.basis.document_path,
+            "experiment_document": task.basis.document,
+            "frozen_lab_definition_json": lab_definition_json,
+        },
+        "delta_inventory": {
+            "digest": task.delta.digest,
+            "file_count": len(task.delta.files),
+            "hunk_count": sum(len(_hunks_for_file(file)) for file in task.delta.files),
+            "incomplete": task.delta.incomplete,
+        },
+        "evidence": evidence,
+        "source_inventory": {
+            "file_count": len(task.source_bundle.files),
+            "declared_paths": list(task.source_bundle.declared_paths),
+            "required_patterns": list(task.source_bundle.required_patterns),
+            "allowed_patterns": list(task.source_bundle.allowed_patterns),
+        },
+    }
+    schema = {
+        "decision": "compliant | violation | inconclusive",
+        "confidence": "number from 0 to 1",
+        "violations": [
+            {
+                "category": (
+                    "hardcoded_or_checker_abuse | baseline_degradation | "
+                    "constraint_violation | out_of_scope_modification"
+                ),
+                "summary": "short finding",
+                "evidence": [{"path": "relative path", "description": "specific evidence"}],
+            }
+        ],
+        "summary": "short overall explanation for this evidence chunk",
+        "requires_human_review": True,
+    }
+    return (
+        ChatMessage(
+            "system",
+            "You audit one complete evidence chunk of an HPC lab submission. Use only supplied "
+            "evidence. Return one JSON object and never issue discipline. Report a violation "
+            "only when this chunk contains concrete evidence; report compliant when this chunk "
+            "contains no violation; report inconclusive when the chunk itself is insufficient. "
+            "Write human-readable text in Simplified Chinese. Keep paths and enum values exact. "
+            "The full review is split across chunks, so do not claim that unseen chunks were "
+            "reviewed.",
+        ),
+        ChatMessage(
+            "user",
+            "Review chunk "
+            + str(index + 1)
+            + " of "
+            + str(count)
+            + ". Required JSON schema:\n"
+            + json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            + "\nEvidence:\n"
+            + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        ),
+    )
+
+
+def _merge_compliance_verdicts(
+    verdicts: list[dict[str, Any]],
+    chunk_count: int,
+    failed_count: int,
+) -> dict[str, Any]:
+    violations: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for verdict in verdicts:
+        for violation in verdict.get("violations", []):
+            key = json.dumps(violation, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if key not in seen:
+                seen.add(key)
+                violations.append(violation)
+    decisions = [verdict.get("decision") for verdict in verdicts]
+    if failed_count or len(verdicts) != chunk_count or "inconclusive" in decisions:
+        decision = "inconclusive"
+        summary = f"已完成 {len(verdicts)}/{chunk_count} 个证据分片, 仍有证据无法确认。"
+    elif "violation" in decisions:
+        decision = "violation"
+        summary = f"已完成全部 {chunk_count} 个证据分片, 发现 {len(violations)} 条违规线索。"
+    else:
+        decision = "compliant"
+        summary = f"已完成全部 {chunk_count} 个证据分片, 未发现违规优化或绕过评测的证据。"
+    confidence_values = [
+        value
+        for value in (verdict.get("confidence") for verdict in verdicts)
+        if isinstance(value, int | float) and not isinstance(value, bool)
+    ]
+    return {
+        "decision": decision,
+        "confidence": min(confidence_values, default=0.0),
+        "violations": violations,
+        "summary": summary,
+        "requires_human_review": True,
+    }
+
+
+def _chunked_evidence_diagnostics(
+    task: ComplianceReviewTask,
+    chunks: tuple[tuple[ChatMessage, ...], ...],
+    request_chars: list[int],
+    completed_count: int,
+    failures: list[dict[str, Any]],
+) -> dict[str, Any]:
+    execution_names = {"CMakeLists.txt", "Makefile", "makefile", "compile.sh", "run.sh"}
+    source_context_count = sum(
+        file.path.rsplit("/", 1)[-1] in execution_names for file in task.source_bundle.files
+    )
+    return {
+        "kind": "compliance",
+        "review_strategy": "chunked-v1",
+        "prompt_evidence_chars": None,
+        "prompt_chars": sum(request_chars),
+        "request_chars": request_chars,
+        "incomplete": bool(failures) or task.delta.incomplete,
+        "chunk_count": len(chunks),
+        "completed_chunk_count": completed_count,
+        "failed_chunk_count": len(failures),
+        "model_context_mode": "adaptive_chunks",
+        "source_bundle": {
+            "file_count": len(task.source_bundle.files),
+            "bytes_read": task.source_bundle.total_bytes_read,
+            "truncated_file_count": sum(file.truncated for file in task.source_bundle.files),
+        },
+        "baseline_delta": {
+            "file_count": len(task.delta.files),
+            "hunk_count": sum(len(_hunks_for_file(file)) for file in task.delta.files),
+            "covered_file_count": len(task.delta.files) if not failures else 0,
+            "covered_hunk_count": (
+                sum(len(_hunks_for_file(file)) for file in task.delta.files)
+                if not failures
+                else 0
+            ),
+            "truncated_file_count": 0,
+            "truncated_hunk_count": 0,
+        },
+        "source_context": {
+            "file_count": source_context_count,
+            "truncated_file_count": sum(
+                file.truncated
+                for file in task.source_bundle.files
+                if file.path.rsplit("/", 1)[-1] in execution_names
+            ),
+            "omitted_unchanged_file_count": max(
+                0,
+                len(task.source_bundle.files) - source_context_count,
+            ),
+        },
+    }
 
 
 def _prompt_evidence_chars(identity: ReviewIdentity) -> int:
