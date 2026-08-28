@@ -32,7 +32,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: nightly-review
-              image: harbor.clusters.zjusct.io/library/oj-checker@sha256:c99bfd47836180f3c06524a74ff1d983e88e3f11fe04f7c7ef40229be7e7d41f
+              image: harbor.clusters.zjusct.io/library/oj-checker@sha256:ebc69a3bb6a2556b3d1d304e2ff3123798a14c5b59f8d902ac38dca47e6116de
               args: ["nightly"]
               env:
                 - name: DB_URL
