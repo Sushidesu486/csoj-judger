@@ -89,6 +89,33 @@ def test_compliance_review_does_not_retry_a_malformed_model_response() -> None:
     assert client.call_count == 1
 
 
+def test_compliance_review_falls_back_to_reasoning_json_and_skips_explanation_braces() -> None:
+    client = ScriptedChatClient(
+        [
+            ModelReply(
+                content=(
+                    "The explanation contains {braces}, followed by the result:\n"
+                    '{"decision":"compliant","confidence":0.9,"violations":[],'
+                    '"summary":"未发现违规。","requires_human_review":true}'
+                ),
+                reasoning_content=(
+                    '{"decision":"compliant","confidence":0.9,"violations":[],'
+                    '"summary":"未发现违规。","requires_human_review":true}'
+                ),
+            )
+        ]
+    )
+
+    result = OpenAICompatibleReviewer(
+        client,
+        clock=lambda: datetime(2026, 8, 25, 10, 0, tzinfo=UTC),
+        max_attempts=1,
+    ).review(compliance_task())
+
+    assert result.conclusive
+    assert result.verdict["decision"] == "compliant"
+
+
 def test_plagiarism_review_accepts_minor_edit_relationship() -> None:
     client = ScriptedChatClient(
         [

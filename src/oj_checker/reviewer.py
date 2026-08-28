@@ -132,11 +132,8 @@ class OpenAICompatibleReviewer:
                     messages=messages,
                     parameters=dict(task.identity.model_parameters),
                 )
-                raw_response = reply.content or reply.reasoning_content
-                if not raw_response:
-                    raise ReviewParseError("model returned no content or reasoning_content")
-                verdict = _parse_verdict(
-                    raw_response,
+                raw_response, verdict = _parse_reply_verdict(
+                    reply,
                     task,
                     prompt_evidence_incomplete=prompt_evidence_incomplete,
                 )
@@ -164,17 +161,13 @@ class OpenAICompatibleReviewer:
             request_chars.append(sum(len(message.content) for message in messages))
             try:
                 reply = self._complete_with_retries(task.identity, messages)
-                raw_response = reply.content or reply.reasoning_content
-                if not raw_response:
-                    raise ReviewParseError("model returned no content or reasoning_content")
-                raw_responses.append(raw_response)
-                verdicts.append(
-                    _parse_verdict(
-                        raw_response,
-                        task,
-                        prompt_evidence_incomplete=task.delta.incomplete,
-                    )
+                raw_response, verdict = _parse_reply_verdict(
+                    reply,
+                    task,
+                    prompt_evidence_incomplete=task.delta.incomplete,
                 )
+                raw_responses.append(raw_response)
+                verdicts.append(verdict)
             except ReviewError as error:
                 failures.append(
                     {
@@ -1039,25 +1032,65 @@ def _parse_verdict(
     *,
     prompt_evidence_incomplete: bool,
 ) -> dict[str, Any]:
-    start = raw_response.find("{")
-    end = raw_response.rfind("}")
-    if start < 0 or end < start:
-        raise ReviewParseError("model response does not contain a JSON object")
-    try:
-        value = json.loads(raw_response[start : end + 1])
-    except json.JSONDecodeError as error:
-        raise ReviewParseError("model response contains invalid JSON") from error
-    if not isinstance(value, dict):
+    decoder = json.JSONDecoder()
+    found_object = False
+    first_validation_error: ReviewParseError | None = None
+    for start, character in enumerate(raw_response):
+        if character != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(raw_response[start:])
+        except json.JSONDecodeError:
+            continue
+        found_object = True
+        if not isinstance(value, dict):
+            continue
+        try:
+            if isinstance(task, ComplianceReviewTask):
+                _validate_compliance_verdict(
+                    value,
+                    task,
+                    prompt_evidence_incomplete=prompt_evidence_incomplete,
+                )
+            else:
+                _validate_plagiarism_verdict(value, task)
+        except ReviewParseError as error:
+            if first_validation_error is None:
+                first_validation_error = error
+            continue
+        return value
+    if first_validation_error is not None:
+        raise first_validation_error
+    if found_object:
         raise ReviewParseError("model verdict must be a JSON object")
-    if isinstance(task, ComplianceReviewTask):
-        _validate_compliance_verdict(
-            value,
-            task,
-            prompt_evidence_incomplete=prompt_evidence_incomplete,
-        )
-    else:
-        _validate_plagiarism_verdict(value, task)
-    return value
+    raise ReviewParseError("model response does not contain valid JSON")
+
+
+def _parse_reply_verdict(
+    reply: ModelReply,
+    task: ReviewTask,
+    *,
+    prompt_evidence_incomplete: bool,
+) -> tuple[str, dict[str, Any]]:
+    candidates = tuple(
+        value
+        for value in (reply.content, reply.reasoning_content)
+        if isinstance(value, str) and value
+    )
+    if not candidates:
+        raise ReviewParseError("model returned no content or reasoning_content")
+    last_error: ReviewParseError | None = None
+    for raw_response in candidates:
+        try:
+            return raw_response, _parse_verdict(
+                raw_response,
+                task,
+                prompt_evidence_incomplete=prompt_evidence_incomplete,
+            )
+        except ReviewParseError as error:
+            last_error = error
+    assert last_error is not None
+    raise last_error
 
 
 def _validate_compliance_verdict(
