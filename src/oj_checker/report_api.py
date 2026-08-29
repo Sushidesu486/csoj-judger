@@ -434,7 +434,7 @@ class RunnerReviewLauncher:
         runner: Any,
         *,
         min_score: int = 0,
-        rules_version: str = "audit-rules-v1",
+        rules_version: str = "audit-rules-v2",
         clock: Callable[[], datetime],
     ) -> None:
         self._runner = runner
@@ -455,7 +455,7 @@ class RunnerReviewLauncher:
                     min_score=self._min_score,
                     submission_id=submission_id,
                     rules_version=self._rules_version,
-                    prompt_version="compliance-v3",
+                    prompt_version="compliance-v5",
                     model=model,
                     execute_reviews=True,
                 )

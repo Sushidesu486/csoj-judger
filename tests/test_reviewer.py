@@ -15,8 +15,10 @@ from oj_checker.reviewer import (
     PlagiarismReviewTask,
     ReviewParseError,
     TransientReviewError,
+    _compliance_evidence_items,
     _compliance_messages,
     _review_chunk_chars,
+    _split_evidence_item,
 )
 from oj_checker.similarity import (
     BaselineDelta,
@@ -416,6 +418,71 @@ def test_chunked_review_uses_conservative_default_context_budget() -> None:
     assert _review_chunk_chars(identity("compliance", "compliance-v3", "compliance-result-v1")) == (
         180_000
     )
+
+
+def test_chunk_evidence_attaches_referenced_unchanged_macro_definition() -> None:
+    header = SourceFile(
+        path="src/TwoPunctures.h",
+        declared_bytes=23,
+        declared_sha256=None,
+        content="#define N_PlaneRelax 1\n",
+        bytes_read=23,
+        omission_reason=None,
+    )
+    task = replace(
+        compliance_task(),
+        source_bundle=SourceBundle("submission-a", (header,), header.bytes_read),
+        delta=BaselineDelta(
+            submission_id="submission-a",
+            files=(
+                BaselineDeltaFile(
+                    path="src/TwoPunctures.C",
+                    added_text="relax_once();\n",
+                    removed_text="for (n = 0; n < N_PlaneRelax; n++) relax_once();\n",
+                    hunks=(
+                        BaselineDeltaHunk(
+                            old_start=1,
+                            old_count=1,
+                            new_start=1,
+                            new_count=1,
+                            lines=(
+                                "-for (n = 0; n < N_PlaneRelax; n++) relax_once();\n"
+                                "+relax_once();\n"
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            incomplete=False,
+            digest="macro-context-delta",
+        ),
+    )
+
+    item = _compliance_evidence_items(task)[0]
+
+    assert item["referenced_unchanged_definitions"] == [
+        {
+            "path": "src/TwoPunctures.h",
+            "symbol": "N_PlaneRelax",
+            "definition": "#define N_PlaneRelax 1",
+        }
+    ]
+
+
+def test_split_evidence_preserves_line_boundaries_and_exact_core_coverage() -> None:
+    original = "".join(f"line-{index:04}\n" for index in range(500))
+
+    parts = _split_evidence_item({"kind": "delta_hunk", "text": original}, 1_000)
+
+    assert len(parts) > 1
+    cores = []
+    for part in parts:
+        text = part["text"]
+        start = part["core_text_start"]
+        end = start + part["core_text_chars"]
+        cores.append(text[start:end])
+        assert text.endswith("\n")
+    assert "".join(cores) == original
 
 
 class ScriptedChatClient:

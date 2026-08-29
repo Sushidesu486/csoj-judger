@@ -2,7 +2,7 @@ import hashlib
 import json
 import re
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -29,6 +29,15 @@ class BaselineDeltaFile:
     added_text: str
     removed_text: str
     hunks: tuple[BaselineDeltaHunk, ...] = ()
+    baseline_kind: str = "course"
+    baseline_revision: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DeltaBaseline:
+    text: str
+    kind: str = "course"
+    revision: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,15 +50,52 @@ class BaselineDelta:
 
 class BaselineDeltaBuilder:
     def build(self, bundle: SourceBundle, basis: ReviewBasis) -> BaselineDelta:
-        baseline_by_path = {file.path: file.text() for file in basis.files}
+        baseline_by_path = {
+            file.path: DeltaBaseline(file.text(), revision=basis.upstream_commit)
+            for file in basis.files
+        }
+        return self._build(
+            bundle,
+            baseline_by_path,
+            detect_missing_baseline_files=True,
+        )
+
+    def build_selected(
+        self,
+        bundle: SourceBundle,
+        baseline_by_path: Mapping[str, DeltaBaseline],
+    ) -> BaselineDelta:
+        """Build a delta for an explicitly selected execution scope.
+
+        Files outside ``bundle.files`` are intentionally out of scope and must
+        not be interpreted as deletions. This matches overlay-style OJ inputs:
+        an unsubmitted framework file remains in the trusted source tree.
+        """
+
+        return self._build(
+            bundle,
+            baseline_by_path,
+            detect_missing_baseline_files=False,
+        )
+
+    def _build(
+        self,
+        bundle: SourceBundle,
+        baseline_by_path: Mapping[str, DeltaBaseline],
+        *,
+        detect_missing_baseline_files: bool,
+    ) -> BaselineDelta:
         delta_files = []
         for source_file in bundle.files:
             if source_file.truncated:
                 continue
-            baseline = baseline_by_path.get(source_file.path, "")
-            if source_file.content == baseline:
+            baseline = baseline_by_path.get(
+                source_file.path,
+                DeltaBaseline("", kind="submission_addition"),
+            )
+            if source_file.content == baseline.text:
                 continue
-            added, removed, hunks = _changed_lines(baseline, source_file.content)
+            added, removed, hunks = _changed_lines(baseline.text, source_file.content)
             if added or removed:
                 delta_files.append(
                     BaselineDeltaFile(
@@ -57,25 +103,30 @@ class BaselineDeltaBuilder:
                         added_text=added,
                         removed_text=removed,
                         hunks=hunks,
+                        baseline_kind=baseline.kind,
+                        baseline_revision=baseline.revision,
                     )
                 )
-        source_paths = {file.path for file in bundle.files}
-        for baseline_file in basis.files:
-            if baseline_file.path in source_paths:
-                continue
-            if any(
-                matches_submission_pattern(baseline_file.path, pattern)
-                for pattern in (*bundle.required_patterns, *bundle.allowed_patterns)
-            ):
-                _, removed, hunks = _changed_lines(baseline_file.text(), "")
-                delta_files.append(
-                    BaselineDeltaFile(
-                        path=baseline_file.path,
-                        added_text="",
-                        removed_text=removed,
-                        hunks=hunks,
+        if detect_missing_baseline_files:
+            source_paths = {file.path for file in bundle.files}
+            for path, baseline in baseline_by_path.items():
+                if path in source_paths:
+                    continue
+                if any(
+                    matches_submission_pattern(path, pattern)
+                    for pattern in (*bundle.required_patterns, *bundle.allowed_patterns)
+                ):
+                    _, removed, hunks = _changed_lines(baseline.text, "")
+                    delta_files.append(
+                        BaselineDeltaFile(
+                            path=path,
+                            added_text="",
+                            removed_text=removed,
+                            hunks=hunks,
+                            baseline_kind=baseline.kind,
+                            baseline_revision=baseline.revision,
+                        )
                     )
-                )
         delta_files.sort(key=lambda file: file.path)
         frozen_files = tuple(delta_files)
         return BaselineDelta(
@@ -378,6 +429,8 @@ def _delta_digest(files: tuple[BaselineDeltaFile, ...]) -> str:
             "path": file.path,
             "added_text": file.added_text,
             "removed_text": file.removed_text,
+            "baseline_kind": file.baseline_kind,
+            "baseline_revision": file.baseline_revision,
         }
         for file in files
     ]

@@ -189,7 +189,7 @@ def test_runner_launcher_builds_a_single_submission_request() -> None:
     assert runner.request.labs == ()
     assert runner.request.owners == ()
     assert runner.request.execute_reviews is True
-    assert runner.request.prompt_version == "compliance-v3"
+    assert runner.request.prompt_version == "compliance-v5"
     assert runner.request.model == "gpt-5.6-luna"
 
 

@@ -12,9 +12,10 @@ from oj_checker.catalog import SubmissionCatalog
 from oj_checker.domain import SelectionPolicy, SnapshotRequest
 
 NIGHTLY_MODEL = "glm-5.3"
-RULES_VERSION = "audit-rules-v1"
-PROMPT_VERSION = "compliance-v3"
-SCHEMA_VERSION = "compliance-result-v1"
+REVIEW_LABS = ("lab2", "lab2-riscv", "lab3", "lab3p5", "lab4-cpu", "lab4-gpu", "lab5")
+RULES_VERSION = "audit-rules-v2"
+PROMPT_VERSION = "compliance-v5"
+SCHEMA_VERSION = "compliance-result-v2"
 _MAX_RESPONSE_BYTES = 1 << 20
 
 
@@ -74,6 +75,7 @@ class NightlyReviewRunner:
                 SelectionPolicy.BEST_PER_OWNER_LAB,
                 cutoff=cutoff,
                 min_score=0,
+                labs=REVIEW_LABS,
             )
         ).submissions
 

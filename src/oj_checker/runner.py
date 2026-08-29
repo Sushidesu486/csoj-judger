@@ -28,6 +28,7 @@ from oj_checker.review_ledger import (
     ReviewLedger,
     ReviewTaskType,
 )
+from oj_checker.review_scope import ComplianceReviewScopeBuilder
 from oj_checker.reviewer import (
     ComplianceReviewTask,
     PlagiarismReviewTask,
@@ -55,12 +56,13 @@ class ReviewPipeline:
     ledger: ReviewLedger
     source_policy: SourcePolicy
     model_parameters: tuple[tuple[str, ModelParameter], ...]
-    compliance_prompt_version: str = "compliance-v3"
-    compliance_schema_version: str = "compliance-result-v1"
+    compliance_scope_builder: ComplianceReviewScopeBuilder | None = None
+    compliance_prompt_version: str = "compliance-v5"
+    compliance_schema_version: str = "compliance-result-v2"
     plagiarism_prompt_version: str = "plagiarism-v1"
     plagiarism_schema_version: str = "plagiarism-result-v1"
-    source_policy_version: str = "source-bundle-v1"
-    delta_version: str = "line-delta-v2"
+    source_policy_version: str = "source-bundle-v2"
+    delta_version: str = "scoped-line-delta-v3"
     similarity_version: str = "minhash-lsh-v1"
     prompt_evidence_chars: int = 240_000
     near_identical_threshold: float = 0.95
@@ -195,15 +197,36 @@ class AuditRunner:
         for submission in single_review_submissions:
             document = documents[submission.id]
             basis = bases[submission.lab_id]
-            identity = self._compliance_identity(request, pipeline, document, basis)
+            scope = (
+                pipeline.compliance_scope_builder.build(
+                    submission.lab_id,
+                    bundles[submission.id],
+                    basis,
+                )
+                if pipeline.compliance_scope_builder is not None
+                else None
+            )
+            compliance_document = (
+                SimilarityDocument(submission, scope.delta) if scope is not None else document
+            )
+            identity = self._compliance_identity(
+                request,
+                pipeline,
+                compliance_document,
+                basis,
+            )
             compliance_task = ComplianceReviewTask(
                 identity=identity,
                 owner=submission.owner,
                 score=submission.score,
                 lab_definition=submission.lab_definition,
                 basis=basis,
-                source_bundle=bundles[submission.id],
-                delta=document.delta,
+                source_bundle=(
+                    scope.source_bundle if scope is not None else bundles[submission.id]
+                ),
+                delta=compliance_document.delta,
+                review_policy=scope.policy if scope is not None else None,
+                scope_diagnostics=scope.diagnostics if scope is not None else {},
             )
             review_tasks[identity.key] = compliance_task
             audit_tasks.append(
@@ -289,6 +312,11 @@ class AuditRunner:
             "model_parameters": dict(pipeline.model_parameters),
             "prompt_evidence_chars": pipeline.prompt_evidence_chars,
             "review_strategy": pipeline.compliance_review_strategy,
+            "review_scope_strategy": (
+                "lab-aware-execution-scope-v1"
+                if pipeline.compliance_scope_builder is not None
+                else "full-source-v1"
+            ),
             "review_chunk_chars": pipeline.review_chunk_chars,
             "near_identical_threshold": pipeline.near_identical_threshold,
         }

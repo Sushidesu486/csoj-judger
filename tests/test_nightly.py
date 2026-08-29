@@ -56,6 +56,23 @@ def test_nightly_has_no_review_call_budget() -> None:
     assert len(client.review_requests) == 150
 
 
+def test_nightly_selects_only_the_seven_supported_experiments() -> None:
+    supported = submission("supported", 100)
+    historical = submission("historical", 100, lab_id="lab4p5")
+    client = FakeComplianceClient(reports={supported.id: None})
+    runner = NightlyReviewRunner(
+        InMemorySubmissionCatalog([supported, historical]),
+        client,
+        basis_commit="basis-current",
+        clock=lambda: datetime(2026, 8, 28, 18, 0, tzinfo=UTC),
+    )
+
+    summary = runner.run()
+
+    assert summary.candidate_count == 1
+    assert client.review_requests == [("supported", NIGHTLY_MODEL)]
+
+
 class FakeComplianceClient:
     def __init__(self, reports: dict[str, dict | Exception | None]) -> None:
         self._reports = reports
@@ -80,7 +97,7 @@ def report(
     *,
     decision: str,
     model: str = "glm-5.3",
-    prompt_version: str = "compliance-v3",
+    prompt_version: str = "compliance-v5",
 ) -> dict:
     return {
         "submission": {"id": submission_id},
@@ -88,19 +105,19 @@ def report(
         "decision": decision,
         "provenance": {
             "basis_commit": "basis-current",
-            "rules_version": "audit-rules-v1",
+            "rules_version": "audit-rules-v2",
             "prompt_version": prompt_version,
-            "schema_version": "compliance-result-v1",
+            "schema_version": "compliance-result-v2",
             "model": model,
         },
     }
 
 
-def submission(submission_id: str, score: int) -> Submission:
+def submission(submission_id: str, score: int, *, lab_id: str = "lab2") -> Submission:
     return Submission(
         id=submission_id,
         owner=submission_id,
-        lab_id="lab2",
+        lab_id=lab_id,
         score=score,
         input_digest=f"digest-{submission_id}",
         submitted_at=datetime(2026, 8, 27, tzinfo=UTC) + timedelta(seconds=score),

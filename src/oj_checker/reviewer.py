@@ -1,5 +1,7 @@
+import dataclasses
 import hashlib
 import json
+import re
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
@@ -66,6 +68,8 @@ class ComplianceReviewTask:
     basis: ReviewBasis
     source_bundle: SourceBundle
     delta: BaselineDelta
+    review_policy: str | None = None
+    scope_diagnostics: Mapping[str, Any] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.identity.task_type is not ReviewTaskType.COMPLIANCE:
@@ -350,6 +354,7 @@ def _compliance_chunks(
 
 def _compliance_evidence_items(task: ComplianceReviewTask) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
+    macro_definitions = _unchanged_macro_definitions(task)
     for file in task.delta.files:
         for index, hunk in enumerate(_hunks_for_file(file)):
             items.append(
@@ -357,12 +362,19 @@ def _compliance_evidence_items(task: ComplianceReviewTask) -> list[dict[str, Any
                     "kind": "delta_hunk",
                     "path": file.path,
                     "artifact": _artifact_kind(file.path),
+                    "baseline_kind": file.baseline_kind,
+                    "baseline_revision": file.baseline_revision,
                     "hunk_index": index,
                     "old_start": hunk.old_start,
                     "old_count": hunk.old_count,
                     "new_start": hunk.new_start,
                     "new_count": hunk.new_count,
                     "text": hunk.lines,
+                    "referenced_unchanged_definitions": _referenced_macro_definitions(
+                        hunk.lines,
+                        macro_definitions,
+                        exclude_path=file.path,
+                    ),
                 }
             )
     execution_names = {"CMakeLists.txt", "Makefile", "makefile", "compile.sh", "run.sh"}
@@ -382,19 +394,90 @@ def _compliance_evidence_items(task: ComplianceReviewTask) -> list[dict[str, Any
     return items
 
 
+def _unchanged_macro_definitions(
+    task: ComplianceReviewTask,
+) -> Mapping[str, tuple[Mapping[str, str], ...]]:
+    changed_paths = {file.path for file in task.delta.files}
+    definitions: dict[str, list[Mapping[str, str]]] = {}
+    pattern = re.compile(
+        r"(?m)^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)"
+        r"(?:[ \t]+([^/\r\n]+?))?[ \t]*(?://.*)?$"
+    )
+    for source_file in task.source_bundle.files:
+        if source_file.truncated or source_file.path in changed_paths:
+            continue
+        normalized = source_file.content.replace("\r\n", "\n").replace("\r", "\n")
+        for match in pattern.finditer(normalized):
+            symbol = match.group(1)
+            definitions.setdefault(symbol, []).append(
+                {
+                    "path": source_file.path,
+                    "symbol": symbol,
+                    "definition": match.group(0).strip(),
+                }
+            )
+    return {symbol: tuple(values) for symbol, values in definitions.items()}
+
+
+def _referenced_macro_definitions(
+    text: str,
+    definitions: Mapping[str, tuple[Mapping[str, str], ...]],
+    *,
+    exclude_path: str,
+) -> list[Mapping[str, str]]:
+    identifiers = set(re.findall(r"\b[A-Za-z_]\w*\b", text))
+    return [
+        definition
+        for symbol in sorted(identifiers & definitions.keys())
+        for definition in definitions[symbol]
+        if definition["path"] != exclude_path
+    ]
+
+
 def _split_evidence_item(item: dict[str, Any], max_text_chars: int) -> tuple[dict[str, Any], ...]:
     text_key = "text" if "text" in item else "content"
     value = item.get(text_key)
     if not isinstance(value, str) or len(value) <= max_text_chars:
         return (item,)
+    context_chars = min(6_000, max_text_chars // 8)
+    core_chars = max(1, max_text_chars - 2 * context_chars)
     parts: list[dict[str, Any]] = []
-    total = (len(value) + max_text_chars - 1) // max_text_chars
-    for index in range(total):
-        start = index * max_text_chars
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    while start < len(value):
+        proposed_end = min(len(value), start + core_chars)
+        end = proposed_end
+        if proposed_end < len(value):
+            newline = value.rfind("\n", start, proposed_end)
+            if newline >= start:
+                end = newline + 1
+        if end <= start:
+            end = proposed_end
+        ranges.append((start, end))
+        start = end
+    total = len(ranges)
+    for index, (start, end) in enumerate(ranges):
+        prefix_start = max(0, start - context_chars)
+        if prefix_start > 0:
+            newline = value.find("\n", prefix_start, start)
+            if newline >= 0:
+                prefix_start = newline + 1
+        suffix_end = min(len(value), end + context_chars)
+        if suffix_end < len(value):
+            newline = value.rfind("\n", end, suffix_end)
+            if newline >= end:
+                suffix_end = newline + 1
+        prefix = value[prefix_start:start]
+        core = value[start:end]
+        suffix = value[end:suffix_end]
         part = dict(item)
-        part[text_key] = value[start : start + max_text_chars]
+        part[text_key] = prefix + core + suffix
         part["part_index"] = index
         part["part_count"] = total
+        part["core_text_start"] = len(prefix)
+        part["core_text_chars"] = len(core)
+        part["context_prefix_chars"] = len(prefix)
+        part["context_suffix_chars"] = len(suffix)
         parts.append(part)
     return tuple(parts)
 
@@ -418,7 +501,11 @@ def _build_compliance_chunk_messages(
     index: int,
     count: int,
 ) -> tuple[ChatMessage, ...]:
-    lab_definition_json = json.dumps(task.lab_definition, ensure_ascii=False, sort_keys=True)
+    lab_definition_json = (
+        json.dumps(task.lab_definition, ensure_ascii=False, sort_keys=True)
+        if task.review_policy is None
+        else "trusted judge constraints are summarized in review_policy"
+    )
     payload = {
         "task": "compliance_review_chunk",
         "chunk": {"index": index, "count": count},
@@ -432,9 +519,10 @@ def _build_compliance_chunk_messages(
             "upstream_commit": task.basis.upstream_commit,
             "source_path": task.basis.source_path,
             "document_path": task.basis.document_path,
-            "experiment_document": task.basis.document,
+            "experiment_document": task.review_policy or task.basis.document,
             "frozen_lab_definition_json": lab_definition_json,
         },
+        "review_scope": _scope_prompt_summary(task.scope_diagnostics),
         "delta_inventory": {
             "digest": task.delta.digest,
             "file_count": len(task.delta.files),
@@ -455,8 +543,8 @@ def _build_compliance_chunk_messages(
         "violations": [
             {
                 "category": (
-                    "hardcoded_or_checker_abuse | baseline_degradation | "
-                    "constraint_violation | out_of_scope_modification"
+                    "hardcoded_or_checker_abuse | required_computation_reduction | "
+                    "fixed_problem_constraint_change | fabricated_or_missing_output"
                 ),
                 "summary": "short finding",
                 "evidence": [{"path": "relative path", "description": "specific evidence"}],
@@ -471,7 +559,16 @@ def _build_compliance_chunk_messages(
             "You audit one complete evidence chunk of an HPC lab submission. Use only supplied "
             "evidence. Return one JSON object and never issue discipline. Report a violation "
             "only when this chunk contains concrete evidence; report compliant when this chunk "
-            "contains no violation; report inconclusive when the chunk itself is insufficient. "
+            "contains no concrete violation. Do not report a violation merely because a refactor "
+            "is large, equivalence is not proven, a generic race is possible, performance may "
+            "regress, or a tuning parameter is ignored. Only report concrete reduction of the "
+            "required physics workload, fixed-problem changes, fabricated output, precomputed "
+            "answers, or checker abuse. Do not report inconclusive merely because "
+            "this is one chunk; use inconclusive only when supplied evidence is explicitly "
+            "cut short, incomplete, or internally unparsable. Split evidence items include "
+            "overlapping prefix/suffix context and identify the uniquely covered core range. "
+            "Treat referenced_unchanged_definitions as authoritative submitted dependency "
+            "context when interpreting loop bounds and compile-time branches. "
             "Write human-readable text in Simplified Chinese. Keep paths and enum values exact. "
             "The full review is split across chunks, so do not claim that unseen chunks were "
             "reviewed.",
@@ -578,6 +675,7 @@ def _chunked_evidence_diagnostics(
                 len(task.source_bundle.files) - source_context_count,
             ),
         },
+        "review_scope": dict(task.scope_diagnostics),
     }
 
 
@@ -592,14 +690,15 @@ def _compliance_messages(
     task: ComplianceReviewTask,
     max_evidence_chars: int,
 ) -> tuple[tuple[ChatMessage, ...], bool, dict[str, Any]]:
-    lab_definition_json = json.dumps(
-        task.lab_definition,
-        ensure_ascii=False,
-        sort_keys=True,
+    lab_definition_json = (
+        json.dumps(task.lab_definition, ensure_ascii=False, sort_keys=True)
+        if task.review_policy is None
+        else "trusted judge constraints are summarized in review_policy"
     )
+    experiment_document = task.review_policy or task.basis.document
     document_budget = max(
         1,
-        min(len(task.basis.document), min(80_000, max_evidence_chars // 3)),
+        min(len(experiment_document), min(80_000, max_evidence_chars // 3)),
     )
     lab_definition_budget = max(
         1,
@@ -622,7 +721,7 @@ def _compliance_messages(
             "source_path": task.basis.source_path,
             "document_path": task.basis.document_path,
             "experiment_document": _bounded_text(
-                task.basis.document,
+                experiment_document,
                 document_budget,
                 reason="document_budget",
             ),
@@ -632,6 +731,7 @@ def _compliance_messages(
                 reason="lab_definition_budget",
             ),
         },
+        "review_scope": _scope_prompt_summary(task.scope_diagnostics),
         "baseline_delta": _delta_payload(task.delta, delta_budget, include_hunks=True),
         "source_context": _source_payload(
             task.source_bundle,
@@ -645,8 +745,8 @@ def _compliance_messages(
         "violations": [
             {
                 "category": (
-                    "hardcoded_or_checker_abuse | baseline_degradation | "
-                    "constraint_violation | out_of_scope_modification"
+                    "hardcoded_or_checker_abuse | required_computation_reduction | "
+                    "fixed_problem_constraint_change | fabricated_or_missing_output"
                 ),
                 "summary": "short finding",
                 "evidence": [{"path": "relative path", "description": "specific evidence"}],
@@ -799,6 +899,8 @@ def _delta_payload(
                 {
                     "path": file.path,
                     "artifact": _artifact_kind(file.path),
+                    "baseline_kind": file.baseline_kind,
+                    "baseline_revision": file.baseline_revision,
                     "added_chars": len(file.added_text),
                     "removed_chars": len(file.removed_text),
                     "hunks": [
@@ -834,6 +936,8 @@ def _delta_payload(
             {
                 "path": file.path,
                 "artifact": _artifact_kind(file.path),
+                "baseline_kind": file.baseline_kind,
+                "baseline_revision": file.baseline_revision,
                 "added_text": added,
                 "removed_text": removed,
             }
@@ -928,7 +1032,49 @@ def _compliance_evidence_diagnostics(
                 "omitted_unchanged_file_count", 0
             ),
         },
+        "review_scope": dict(task.scope_diagnostics),
     }
+
+
+def _scope_prompt_summary(diagnostics: Mapping[str, Any]) -> Mapping[str, Any]:
+    if not diagnostics:
+        return {}
+    summary: dict[str, Any] = {
+        key: diagnostics.get(key)
+        for key in (
+            "strategy",
+            "track",
+            "complete",
+            "fallback_reason",
+            "execution_targets",
+            "input_parameters",
+            "input_file_error",
+            "critical_configuration",
+        )
+        if key in diagnostics
+    }
+    for key in (
+        "original",
+        "execution_scope",
+        "excluded",
+        "unchanged_against_selected_baseline",
+        "review_delta",
+    ):
+        value = diagnostics.get(key)
+        if isinstance(value, Mapping):
+            summary[key] = {
+                item_key: item_value
+                for item_key, item_value in value.items()
+                if item_key not in {"files", "reasons"}
+            }
+    reference = diagnostics.get("reference_selection")
+    if isinstance(reference, Mapping):
+        summary["reference_selection"] = {
+            key: reference.get(key)
+            for key in ("selected_repository", "selected_revision", "course_match")
+            if key in reference
+        }
+    return summary
 
 
 def _bounded_text(value: str, max_chars: int, *, reason: str) -> dict[str, Any]:
@@ -1106,6 +1252,10 @@ def _validate_compliance_verdict(
         raise ReviewParseError("compliance violations must be a list")
     allowed_categories = {
         "hardcoded_or_checker_abuse",
+        "required_computation_reduction",
+        "fixed_problem_constraint_change",
+        "fabricated_or_missing_output",
+        # Accepted for reading older result schemas.
         "baseline_degradation",
         "constraint_violation",
         "out_of_scope_modification",

@@ -21,6 +21,10 @@ from oj_checker.report_api import (
 from oj_checker.report_store import FileReportStore
 from oj_checker.review_basis import GitReviewBasisProvider
 from oj_checker.review_ledger import FileReviewLedger
+from oj_checker.review_scope import (
+    ComplianceReviewScopeBuilder,
+    GitLab4ReferenceProvider,
+)
 from oj_checker.reviewer import OpenAICompatibleReviewer, OpenAIStreamingChatClient
 from oj_checker.runner import AuditRunner, ReviewPipeline
 from oj_checker.similarity import BaselineDeltaBuilder, SimilarityDetector, SimilarityPolicy
@@ -35,6 +39,8 @@ class Settings:
     git_commit: str
     hpc101_repository: Path
     hpc101_revision: str
+    lab4_reference_repository: Path
+    lab4_reference_revisions: tuple[str, ...]
     llm_base_url: str
     llm_token: str | None
 
@@ -52,6 +58,14 @@ class Settings:
                 os.environ.get("HPC101_REPOSITORY", "/baseline/HPC101")
             ),
             hpc101_revision=os.environ.get("HPC101_REVISION", ""),
+            lab4_reference_repository=Path(
+                os.environ.get("LAB4_REFERENCE_REPOSITORY", "/baseline/NR-amssncku")
+            ),
+            lab4_reference_revisions=tuple(
+                revision.strip()
+                for revision in os.environ.get("LAB4_REFERENCE_REVISIONS", "").split(",")
+                if revision.strip()
+            ),
             llm_base_url=os.environ.get(
                 "LLM_BASE_URL",
                 "http://new-api.new-api.svc.cluster.local:3000/v1",
@@ -205,7 +219,7 @@ def _audit(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
             min_score=args.min_score,
             labs=(args.lab,),
             rules_version=args.rules_version,
-            prompt_version="compliance-v3+plagiarism-v1",
+            prompt_version="compliance-v5+plagiarism-v1",
             model=args.model,
             similarity_threshold=args.similarity_threshold,
             execute_reviews=True,
@@ -281,6 +295,17 @@ def _build_review_runner(
             max_total_bytes=max_total_bytes,
         ),
         model_parameters=(),
+        compliance_scope_builder=ComplianceReviewScopeBuilder(
+            BaselineDeltaBuilder(),
+            lab4_references=(
+                GitLab4ReferenceProvider(
+                    settings.lab4_reference_repository,
+                    settings.lab4_reference_revisions,
+                )
+                if settings.lab4_reference_revisions
+                else None
+            ),
+        ),
         prompt_evidence_chars=max_evidence_chars,
     )
     return (
@@ -304,8 +329,8 @@ def _report_api(settings: Settings, args: argparse.Namespace) -> None:
         num_permutations=64,
         band_size=4,
         similarity_workers=1,
-        max_file_bytes=1_000_000,
-        max_total_bytes=4_000_000,
+        max_file_bytes=10 << 20,
+        max_total_bytes=10 << 20,
         llm_timeout=180,
         max_attempts=2,
         max_evidence_chars=240_000,
@@ -407,14 +432,14 @@ def _parser() -> argparse.ArgumentParser:
     audit.add_argument("--lab", required=True, help="canary and production runs process one lab")
     audit.add_argument("--output-root")
     audit.add_argument("--model", default="gpt-5.6-luna")
-    audit.add_argument("--rules-version", default="audit-rules-v1")
+    audit.add_argument("--rules-version", default="audit-rules-v2")
     audit.add_argument("--similarity-threshold", type=float, default=0.7)
     audit.add_argument("--shingle-size", type=int, default=5)
     audit.add_argument("--num-permutations", type=int, default=64)
     audit.add_argument("--band-size", type=int, default=4)
     audit.add_argument("--similarity-workers", type=int, default=8)
-    audit.add_argument("--max-file-bytes", type=int, default=1_000_000)
-    audit.add_argument("--max-total-bytes", type=int, default=4_000_000)
+    audit.add_argument("--max-file-bytes", type=int, default=10 << 20)
+    audit.add_argument("--max-total-bytes", type=int, default=10 << 20)
     audit.add_argument("--llm-timeout", type=float, default=180)
     audit.add_argument("--max-attempts", type=int, default=2)
     audit.add_argument("--max-evidence-chars", type=int, default=240_000)
