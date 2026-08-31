@@ -46,11 +46,13 @@ spec:
           args:
             - |
               git init /baseline/HPC101
+              git -C /baseline/HPC101 remote remove origin 2>/dev/null || true
               git -C /baseline/HPC101 remote add origin https://github.com/ZJUSCT/HPC101.git
               git -C /baseline/HPC101 fetch --depth=1 origin c12aaa26a346fd3fd8a39eceb3ac355ba14d19b0
               git -C /baseline/HPC101 checkout --detach FETCH_HEAD
               test "$(git -C /baseline/HPC101 rev-parse HEAD)" = c12aaa26a346fd3fd8a39eceb3ac355ba14d19b0
               git init /baseline/NR-amssncku
+              git -C /baseline/NR-amssncku remote remove origin 2>/dev/null || true
               git -C /baseline/NR-amssncku remote add origin https://github.com/xiaoqu0000/NR-amssncku.git
               git -C /baseline/NR-amssncku fetch --depth=1 origin 4056a84ccd86dbae57216c0a790b44a8959ebbf5
               test "$(git -C /baseline/NR-amssncku rev-parse FETCH_HEAD)" = 4056a84ccd86dbae57216c0a790b44a8959ebbf5
