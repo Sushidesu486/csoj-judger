@@ -91,6 +91,10 @@ class NfsSubmissionStore:
     def load_bundle(self, submission: Submission, policy: SourcePolicy) -> SourceBundle:
         if policy.max_file_bytes <= 0 or policy.max_total_bytes <= 0:
             raise ValueError("source byte budgets must be positive")
+        max_file_bytes, max_total_bytes = _effective_source_limits(
+            policy,
+            submission.lab_definition,
+        )
         _validate_submission_id(submission.id)
         manifest_files = submission.input_manifest.get("files", [])
         if not isinstance(manifest_files, list):
@@ -125,7 +129,7 @@ class NfsSubmissionStore:
         for path, parts, declared_bytes, declared_sha256 in sorted(entries):
             if not _is_source_path(path, policy, submission.lab_definition):
                 continue
-            remaining = policy.max_total_bytes - total_bytes_read
+            remaining = max_total_bytes - total_bytes_read
             if remaining <= 0:
                 _validate_file_beneath(self._oj_root, submission.id, parts)
                 source_files.append(
@@ -139,7 +143,7 @@ class NfsSubmissionStore:
                     )
                 )
                 continue
-            read_limit = min(policy.max_file_bytes, remaining)
+            read_limit = min(max_file_bytes, remaining)
             data, truncated = _read_file_beneath(
                 self._oj_root, submission.id, parts, read_limit
             )
@@ -147,7 +151,7 @@ class NfsSubmissionStore:
             if truncated:
                 omission_reason = (
                     OmissionReason.FILE_BUDGET
-                    if policy.max_file_bytes <= remaining
+                    if max_file_bytes <= remaining
                     else OmissionReason.TOTAL_BUDGET
                 )
             source_files.append(
@@ -249,6 +253,34 @@ def _lab_home(lab_definition: Mapping[str, object]) -> Mapping[str, object] | No
     if not isinstance(home, Mapping):
         return None
     return home
+
+
+def _effective_source_limits(
+    policy: SourcePolicy,
+    lab_definition: Mapping[str, object],
+) -> tuple[int, int]:
+    """Do not impose a checker limit below the frozen OJ collection policy."""
+
+    file_limits = [policy.max_file_bytes]
+    total_limits = [policy.max_total_bytes]
+    spec = lab_definition.get("spec")
+    submissions = spec.get("submissions") if isinstance(spec, Mapping) else None
+    if isinstance(submissions, Mapping):
+        for channel_name in ("home", "upload"):
+            channel = submissions.get(channel_name)
+            if not isinstance(channel, Mapping):
+                continue
+            file_limit = channel.get("maxFileBytes")
+            total_limit = channel.get("maxTotalBytes")
+            if isinstance(file_limit, int) and not isinstance(file_limit, bool) and file_limit > 0:
+                file_limits.append(file_limit)
+            if (
+                isinstance(total_limit, int)
+                and not isinstance(total_limit, bool)
+                and total_limit > 0
+            ):
+                total_limits.append(total_limit)
+    return max(file_limits), max(total_limits)
 
 
 def matches_submission_pattern(path: str, pattern: str) -> bool:

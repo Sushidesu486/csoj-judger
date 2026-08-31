@@ -13,6 +13,9 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 from urllib.parse import urlsplit
 
+from oj_checker.agent_runs import AgentRunError, AgentRunQueueFull
+from oj_checker.review_bundle import ReviewBundleError
+
 _COMPLIANCE_DECISIONS = frozenset({"compliant", "violation", "inconclusive"})
 
 
@@ -26,10 +29,48 @@ class ReviewLauncher(Protocol):
     def launch(self, submission_id: str, model: str) -> ReviewLaunchResult: ...
 
 
+class AgentRunService(Protocol):
+    def create(self, envelope: bytes) -> dict[str, Any]: ...
+
+    def get(self, run_id: str) -> dict[str, Any]: ...
+
+    def latest(self, submission_id: str) -> dict[str, Any] | None: ...
+
+    def latest_many(self, submission_ids: Iterable[str]) -> dict[str, dict[str, Any]]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ReviewLaunchResult:
     run_id: str
     error: str | None = None
+
+
+def _agent_run_summary(run: Mapping[str, Any]) -> dict[str, Any]:
+    summary = {
+        key: run[key]
+        for key in (
+            "run_id",
+            "submission_id",
+            "model",
+            "source",
+            "state",
+            "created_at",
+            "updated_at",
+            "error_code",
+        )
+        if key in run
+    }
+    result = run.get("result")
+    if isinstance(result, Mapping):
+        decision = result.get("decision")
+        if isinstance(decision, str):
+            summary["decision"] = decision
+        provenance = result.get("provenance")
+        if isinstance(provenance, Mapping):
+            completed_at = provenance.get("completed_at")
+            if isinstance(completed_at, str):
+                summary["completed_at"] = completed_at
+    return summary
 
 
 class FileComplianceReportReader:
@@ -187,7 +228,8 @@ class ComplianceApi:
         *,
         allowed_models: Iterable[str],
         auth_token: str | None = None,
-        max_body_bytes: int = 64 * 1024,
+        max_body_bytes: int = 2 << 20,
+        agent_runs: AgentRunService | None = None,
     ) -> None:
         if max_body_bytes <= 0:
             raise ValueError("max_body_bytes must be positive")
@@ -200,6 +242,7 @@ class ComplianceApi:
             raise ValueError("allowed_models must contain non-empty model names")
         self._auth_token = auth_token
         self._max_body_bytes = max_body_bytes
+        self._agent_runs = agent_runs
         self._launch_lock = threading.Lock()
 
     def handle(
@@ -232,6 +275,53 @@ class ComplianceApi:
                 )
             return self._json(HTTPStatus.OK, {"models": list(self._allowed_models)})
 
+        if parts == ["v1", "compliance", "review-runs"]:
+            if method != "POST":
+                return self._error(
+                    HTTPStatus.METHOD_NOT_ALLOWED,
+                    "METHOD_NOT_ALLOWED",
+                    "method not allowed",
+                )
+            return self._create_agent_run(body)
+
+        if parts == ["v1", "compliance", "review-runs", "latest:batch"]:
+            if method != "POST":
+                return self._error(
+                    HTTPStatus.METHOD_NOT_ALLOWED,
+                    "METHOD_NOT_ALLOWED",
+                    "method not allowed",
+                )
+            return self._latest_agent_runs_batch(body)
+
+        if len(parts) == 4 and parts[:3] == ["v1", "compliance", "review-runs"]:
+            if method != "GET":
+                return self._error(
+                    HTTPStatus.METHOD_NOT_ALLOWED,
+                    "METHOD_NOT_ALLOWED",
+                    "method not allowed",
+                )
+            return self._get_agent_run(parts[3])
+
+        if (
+            len(parts) == 6
+            and parts[:3] == ["v1", "compliance", "submissions"]
+            and parts[4:] == ["review-runs", "latest"]
+        ):
+            if method != "GET":
+                return self._error(
+                    HTTPStatus.METHOD_NOT_ALLOWED,
+                    "METHOD_NOT_ALLOWED",
+                    "method not allowed",
+                )
+            submission_id = self._normalize_submission_id(parts[3])
+            if submission_id is None:
+                return self._error(
+                    HTTPStatus.BAD_REQUEST,
+                    "BAD_REQUEST",
+                    "submission_id must be a UUID",
+                )
+            return self._latest_agent_run(submission_id)
+
         if len(parts) == 4 and parts[:3] == ["v1", "compliance", "submissions"]:
             if method != "GET":
                 return self._error(
@@ -246,7 +336,9 @@ class ComplianceApi:
                     "BAD_REQUEST",
                     "submission_id must be a UUID",
                 )
-            report = self._reader.get_submission_report(submission_id)
+            report = self._latest_completed_agent_report(submission_id)
+            if report is None:
+                report = self._reader.get_submission_report(submission_id)
             if report is None:
                 return self._error(
                     HTTPStatus.NOT_FOUND,
@@ -265,6 +357,169 @@ class ComplianceApi:
             return self._launch(body)
 
         return self._error(HTTPStatus.NOT_FOUND, "NOT_FOUND", "endpoint not found")
+
+    def _create_agent_run(self, body: bytes) -> ApiResponse:
+        if self._agent_runs is None:
+            return self._error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "AGENT_RUNS_DISABLED",
+                "Agent review runs are not configured",
+            )
+        try:
+            run = self._agent_runs.create(body)
+        except ReviewBundleError:
+            return self._error(
+                HTTPStatus.BAD_REQUEST,
+                "INVALID_REVIEW_BUNDLE",
+                "review bundle verification failed",
+            )
+        except AgentRunQueueFull:
+            return self._error(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                "REVIEW_QUEUE_FULL",
+                "review queue is full",
+            )
+        except AgentRunError:
+            return self._error(
+                HTTPStatus.BAD_REQUEST,
+                "INVALID_REVIEW_REQUEST",
+                "review run request is invalid",
+            )
+        except Exception:
+            return self._error(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "REVIEW_RUN_CREATE_FAILED",
+                "review run could not be created",
+            )
+        return self._json(HTTPStatus.ACCEPTED, run)
+
+    def _get_agent_run(self, run_id: str) -> ApiResponse:
+        if self._agent_runs is None:
+            return self._error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "AGENT_RUNS_DISABLED",
+                "Agent review runs are not configured",
+            )
+        try:
+            run = self._agent_runs.get(run_id)
+        except (LookupError, AgentRunError):
+            return self._error(
+                HTTPStatus.NOT_FOUND,
+                "REVIEW_RUN_NOT_FOUND",
+                "review run was not found",
+            )
+        except Exception:
+            return self._error(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "REVIEW_RUN_READ_FAILED",
+                "review run could not be read",
+            )
+        return self._json(HTTPStatus.OK, run)
+
+    def _latest_agent_run(self, submission_id: str) -> ApiResponse:
+        if self._agent_runs is None:
+            return self._error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "AGENT_RUNS_DISABLED",
+                "Agent review runs are not configured",
+            )
+        try:
+            run = self._agent_runs.latest(submission_id)
+        except AgentRunError:
+            return self._error(
+                HTTPStatus.BAD_REQUEST,
+                "INVALID_REVIEW_REQUEST",
+                "review run request is invalid",
+            )
+        except Exception:
+            return self._error(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "REVIEW_RUN_READ_FAILED",
+                "review run could not be read",
+            )
+        if run is None:
+            return self._error(
+                HTTPStatus.NOT_FOUND,
+                "REVIEW_RUN_NOT_FOUND",
+                "review run was not found",
+            )
+        return self._json(HTTPStatus.OK, run)
+
+    def _latest_agent_runs_batch(self, body: bytes) -> ApiResponse:
+        if self._agent_runs is None:
+            return self._error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "AGENT_RUNS_DISABLED",
+                "Agent review runs are not configured",
+            )
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return self._error(HTTPStatus.BAD_REQUEST, "BAD_REQUEST", "body must be JSON")
+        if not isinstance(payload, dict) or set(payload) != {"submission_ids"}:
+            return self._error(
+                HTTPStatus.BAD_REQUEST,
+                "BAD_REQUEST",
+                "body must contain exactly submission_ids",
+            )
+        submission_ids = payload.get("submission_ids")
+        if (
+            not isinstance(submission_ids, list)
+            or not submission_ids
+            or len(submission_ids) > 1000
+            or any(not isinstance(value, str) for value in submission_ids)
+            or len(set(submission_ids)) != len(submission_ids)
+        ):
+            return self._error(
+                HTTPStatus.BAD_REQUEST,
+                "BAD_REQUEST",
+                "submission_ids must contain 1-1000 unique UUIDs",
+            )
+        normalized: list[str] = []
+        for value in submission_ids:
+            submission_id = self._normalize_submission_id(cast(str, value))
+            if submission_id is None:
+                return self._error(
+                    HTTPStatus.BAD_REQUEST,
+                    "BAD_REQUEST",
+                    "submission_ids must contain 1-1000 unique UUIDs",
+                )
+            normalized.append(submission_id)
+        try:
+            runs = self._agent_runs.latest_many(normalized)
+        except AgentRunError:
+            return self._error(
+                HTTPStatus.BAD_REQUEST,
+                "INVALID_REVIEW_REQUEST",
+                "review run request is invalid",
+            )
+        except Exception:
+            return self._error(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "REVIEW_RUN_READ_FAILED",
+                "review runs could not be read",
+            )
+        items = [
+            _agent_run_summary(runs[submission_id])
+            for submission_id in normalized
+            if submission_id in runs
+        ]
+        return self._json(HTTPStatus.OK, {"items": items})
+
+    def _latest_completed_agent_report(self, submission_id: str) -> dict[str, Any] | None:
+        if self._agent_runs is None:
+            return None
+        try:
+            run = self._agent_runs.latest(submission_id)
+        except AgentRunError:
+            return None
+        if run is None or run.get("state") != "completed":
+            return None
+        result = run.get("result")
+        run_id = run.get("run_id")
+        if not isinstance(result, Mapping) or not isinstance(run_id, str):
+            return None
+        return {**result, "run_id": run_id}
 
     def _launch(self, body: bytes) -> ApiResponse:
         try:

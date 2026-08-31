@@ -61,7 +61,7 @@ class ReviewPipeline:
     compliance_schema_version: str = "compliance-result-v2"
     plagiarism_prompt_version: str = "plagiarism-v1"
     plagiarism_schema_version: str = "plagiarism-result-v1"
-    source_policy_version: str = "source-bundle-v2"
+    source_policy_version: str = "source-bundle-v3"
     delta_version: str = "scoped-line-delta-v3"
     similarity_version: str = "minhash-lsh-v1"
     prompt_evidence_chars: int = 240_000

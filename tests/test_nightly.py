@@ -56,12 +56,13 @@ def test_nightly_has_no_review_call_budget() -> None:
     assert len(client.review_requests) == 150
 
 
-def test_nightly_selects_only_the_seven_supported_experiments() -> None:
+def test_nightly_includes_lab4p5_and_excludes_unconfigured_labs() -> None:
     supported = submission("supported", 100)
-    historical = submission("historical", 100, lab_id="lab4p5")
-    client = FakeComplianceClient(reports={supported.id: None})
+    lab4p5 = submission("lab4p5-student", 100, lab_id="lab4p5")
+    unrelated = submission("unrelated", 100, lab_id="hello-world")
+    client = FakeComplianceClient(reports={supported.id: None, lab4p5.id: None})
     runner = NightlyReviewRunner(
-        InMemorySubmissionCatalog([supported, historical]),
+        InMemorySubmissionCatalog([supported, lab4p5, unrelated]),
         client,
         basis_commit="basis-current",
         clock=lambda: datetime(2026, 8, 28, 18, 0, tzinfo=UTC),
@@ -69,8 +70,11 @@ def test_nightly_selects_only_the_seven_supported_experiments() -> None:
 
     summary = runner.run()
 
-    assert summary.candidate_count == 1
-    assert client.review_requests == [("supported", NIGHTLY_MODEL)]
+    assert summary.candidate_count == 2
+    assert client.review_requests == [
+        ("lab4p5-student", NIGHTLY_MODEL),
+        ("supported", NIGHTLY_MODEL),
+    ]
 
 
 class FakeComplianceClient:

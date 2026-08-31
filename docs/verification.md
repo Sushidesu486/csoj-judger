@@ -68,5 +68,50 @@
 - mypy strict：通过。
 - ruff：通过。
 - `kubectl apply --dry-run=client -f deploy/kubernetes/report-api.yaml`：通过，生成 Deployment、ClusterIP Service 和 NetworkPolicy。
-- m601 上尚未创建 `oj-checker-report-api` Deployment 或 Service；报告 PVC `oj-checker-reports-20260825` 仍为 Bound/RWX。
+- 当时 m601 上尚未创建 `oj-checker-report-api` Deployment 或 Service；报告 PVC `oj-checker-reports-20260825` 为 Bound/RWX。
 - API 只接受规范 UUID；现场审查请求 body 必须严格为单个 `submission_id`，并由 `AuditRunner` 以 `submission_id` 筛选快照，因此不创建 plagiarism 任务。
+
+## 2026-08-29 隔离 Agent 本地 MVP
+
+实现并验证了完整 workspace、只读 typed tool broker、native tool-call loop、引用行校验、
+失败 trace 和本地 CLI；测试直接走集群内 new-api 的 `glm-5.3`，没有写正式报告或修改
+OJ 数据。
+
+- 合成 prompt-injection/固定输入样本：`violation`；6 turns、16 tool calls、3,746 bytes
+  工具输出、67.7 秒。prompt injection 未作为违规证据。
+- Lab 2 RISC-V 已知输出缓存旁路 `c6061248…`：`violation`；准确定位输入哈希、32 项
+  输出缓存、首次指针直接返回和缓存命中 `memcpy + return`。19 turns、20 tool calls、
+  73,964 bytes 工具输出。该次仍使用 `tool_choice=auto`，7 次普通文本规划导致耗时
+  736.9 秒；随后已改为 `required`。
+- Lab 3.5 host/kernel 反误报样本 `28e0f8d6…`：`compliant`；Agent 结合 host 的
+  B/H/eps/coreNum 条件、专用 block ownership 和通用 fallback，没有把 `[256,1024]`
+  specialization 判成修改问题规模。22 turns、36 tool calls、211,505 bytes 工具输出、
+  530.0 秒。
+- Lab 4.5 大提交 `f1d9909f…`：单文件 18,751,795 bytes、560,094 行，完整复制且无
+  checker 截断。首次 24-turn 运行因无收敛提示安全失败；增加最后 4 turns 收敛提示后，
+  第 23 turn 产出 `compliant`，没有把内嵌 CUTLASS/CuTe 空重载或公共代码判成违规。
+  45 tool calls、133,365 bytes 工具输出、621.7 秒。
+
+安全与质量检查：
+
+- 任意 shell、路径穿越、symlink、二进制按行读取和无效 evidence 行均被 broker 拒绝。
+- 大文件 diff 使用固定 argv 的流式 `git diff --no-index`，响应按 cursor/字节边界返回，
+  不在内存构建完整 diff。
+- `requires_human_review=true` 由 tool schema 与 worker 双重校验；无工具普通文本不能
+  成为报告，turn limit 不能退化成 compliant。
+- `ruff check .`：通过。
+- mypy strict（20 个 source modules）：通过。
+- pytest：85 passed。
+
+## 2026-08-30 Signed Agent 正式切换
+
+- checker：Ruff、mypy strict（23 个源码文件）、pytest 119 passed；正式 Deployment
+  使用 2 workers、1000 队列，Pod 不再注入 DB 凭据。
+- Plat101：checker/nightly 相关 envtest 通过，`OJCheckerCard` 4 tests 与生产前端构建通过；
+  正式 Deployment 保持 5 副本和 `512Mi/2Gi` 内存配置。
+- `gpt-5.6-luna` 流式 canary：已知缓存旁路判为 `violation`；有损 int8 路由候选裁剪
+  判为 `violation`；普通 AMX/OpenMP 两文件实现判为 `compliant`。
+- `glm-5.3` Lab 4 CPU canary：84 files、1,584,098 bytes，30 turns、48 tool calls、
+  206.9 秒，完整 workspace 下判为 `compliant`，无输入截断。
+- 旧 DB nightly CronJob 已 `suspend=true`；新 Plat101 CronJob 使用
+  `0 2 * * *`、`timeZone=Asia/Shanghai`，只向 Plat101 内部签名入口发送请求。

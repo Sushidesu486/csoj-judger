@@ -112,6 +112,38 @@ def test_load_bundle_keeps_multifile_metadata_when_content_budget_is_exhausted(t
     assert bundle.files[3].omission_reason == "total_budget"
 
 
+def test_load_bundle_honors_larger_frozen_oj_collection_limits(tmp_path) -> None:
+    content = "abcdefghijklmnopqrst"
+    lab_definition = {
+        "spec": {
+            "submissions": {
+                "home": {
+                    "allow": ["kernel.cu"],
+                    "required": ["kernel.cu"],
+                    "maxFileBytes": 32,
+                    "maxTotalBytes": 32,
+                }
+            }
+        }
+    }
+    submission = make_submission(
+        [{"path": "kernel.cu", "size": len(content)}],
+        lab_definition=lab_definition,
+    )
+    input_root = tmp_path / "submissions" / submission.id / "input"
+    input_root.mkdir(parents=True)
+    (input_root / "kernel.cu").write_text(content)
+
+    bundle = NfsSubmissionStore(tmp_path).load_bundle(
+        submission,
+        SourcePolicy(max_file_bytes=8, max_total_bytes=8),
+    )
+
+    assert bundle.total_bytes_read == len(content)
+    assert bundle.files[0].content == content
+    assert not bundle.files[0].truncated
+
+
 def test_load_bundle_uses_frozen_lab_file_rules(tmp_path) -> None:
     files = [
         {"path": ".env", "size": 9},

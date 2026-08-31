@@ -8,6 +8,9 @@ metadata:
     app.kubernetes.io/component: report-api
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
+    rollingUpdate: null
   selector:
     matchLabels:
       app.kubernetes.io/name: oj-checker
@@ -38,7 +41,7 @@ spec:
                       - m601.clusters.zjusct.io
       initContainers:
         - name: fetch-review-basis
-          image: harbor.clusters.zjusct.io/library/oj-checker@sha256:ebc69a3bb6a2556b3d1d304e2ff3123798a14c5b59f8d902ac38dca47e6116de
+          image: harbor.clusters.zjusct.io/library/oj-checker@sha256:6076f8bc1768213e443005582cbbe4acdfac95c4089d2b92475a233d30481aeb
           command: ["/bin/sh", "-ceu"]
           args:
             - |
@@ -73,14 +76,18 @@ spec:
               mountPath: /tmp
       containers:
         - name: report-api
-          image: harbor.clusters.zjusct.io/library/oj-checker@sha256:ebc69a3bb6a2556b3d1d304e2ff3123798a14c5b59f8d902ac38dca47e6116de
-          args: ["report-api", "--listen", "0.0.0.0:8080"]
+          image: harbor.clusters.zjusct.io/library/oj-checker@sha256:6076f8bc1768213e443005582cbbe4acdfac95c4089d2b92475a233d30481aeb
+          args:
+            - agent-report-api
+            - --listen
+            - 0.0.0.0:8080
+            - --worker-count
+            - "16"
+            - --max-queued
+            - "1000"
+            - --public-key-file
+            - /etc/oj-checker/review-bundle/public-key
           env:
-            - name: DB_URL
-              valueFrom:
-                secretKeyRef:
-                  name: oj-audit-db-ro
-                  key: url
             - name: LLM_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -97,31 +104,19 @@ spec:
               value: /reports
             - name: HPC101_REPOSITORY
               value: /baseline/HPC101
-            - name: HPC101_REVISION
-              value: c12aaa26a346fd3fd8a39eceb3ac355ba14d19b0
             - name: LAB4_REFERENCE_REPOSITORY
               value: /baseline/NR-amssncku
-            - name: LAB4_REFERENCE_REVISIONS
-              value: 4056a84ccd86dbae57216c0a790b44a8959ebbf5
-            - name: OJ_CHECKER_GIT_COMMIT
-              value: 6d5f10a63fc58dbd46a7e81ee97868b17e267464
+            - name: LAB4_REFERENCE_LABEL
+              value: xiaoqu0000/NR-amssncku
             - name: REPORT_API_ALLOWED_MODELS
               value: glm-5.3,gpt-5.6-luna
-            - name: PGOPTIONS
-              value: >-
-                -c default_transaction_read_only=on
-                -c statement_timeout=30000
-                -c lock_timeout=1000
-                -c idle_in_transaction_session_timeout=30000
-                -c application_name=oj-checker-report-api
-            # Optional during development. Production should provide this key
-            # through the cluster's external Secret management.
+            - name: REVIEW_BUNDLE_KEY_ID
+              value: plat101-review-2026-01
             - name: REPORT_API_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: oj-checker-report-api
                   key: token
-                  optional: true
           ports:
             - name: http
               containerPort: 8080
@@ -156,6 +151,10 @@ spec:
               mountPath: /reports
             - name: tmp
               mountPath: /tmp
+            - name: review-bundle-public-key
+              mountPath: /etc/oj-checker/review-bundle/public-key
+              subPath: public-key
+              readOnly: true
       volumes:
         - name: baseline
           emptyDir: {}
@@ -169,6 +168,12 @@ spec:
             claimName: oj-checker-reports-20260825
         - name: tmp
           emptyDir: {}
+        - name: review-bundle-public-key
+          secret:
+            secretName: oj-checker-review-bundle
+            items:
+              - key: public-key
+                path: public-key
 ---
 apiVersion: v1
 kind: Service

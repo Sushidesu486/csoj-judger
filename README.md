@@ -2,7 +2,9 @@
 
 OJ Arbiter 是 HPC101 OJ 的只读合规审查器。它从 plat101 PostgreSQL 和提交 NFS 读取数据，使用本地相似度算法与集群内 LLM 生成审查报告；它不修改提交有效性，也不向 OJ 数据库写入任何内容。
 
-历史调查和集群现状见 [`handover.md`](handover.md)，需求见 [`docs/spec.md`](docs/spec.md)，模块与 Kubernetes 执行设计见 [`docs/architecture.md`](docs/architecture.md)。
+历史调查和集群现状见 [`handover.md`](handover.md)，需求见 [`docs/spec.md`](docs/spec.md)，
+现有模块与 Kubernetes 执行设计见 [`docs/architecture.md`](docs/architecture.md)，单提交审查迁移到
+隔离 Agent Job 的完整方案见 [`docs/agent-review-design.md`](docs/agent-review-design.md)。
 
 ## 安全边界
 
@@ -22,9 +24,13 @@ OJ Arbiter 是 HPC101 OJ 的只读合规审查器。它从 plat101 PostgreSQL �
 - Manifest 冻结 submission metadata 与 lab snapshot；相同 `run_id` 不允许覆盖不同内容。
 - `SubmissionStore.load_bundle` 已实现安全相对路径、symlink 防护、普通文件校验和多文件读取预算。
 - 已提供不调用 LLM 的 `doctor`、`plan`、`smoke` 命令，以及正式 `audit` 命令和固定到 m601 的 canary Job 模板。
-- 已提供 `report-api` 命令：只读查询单提交合规报告，列出模型 allowlist，或现场按指定模型发起一次且仅针对一个 Submission 的审查；现场审查不生成 plagiarism 任务。
-- 已提供每天北京时间 02:00 的 `nightly` CronJob：从权威最高分表选择全部候选，固定请求 `glm-5.3`，不设置调用次数上限。
-- 集群已创建专用 `oj_checker_ro` 登录角色和 `oj-audit-db-ro` Secret；该角色只拥有 `oj_submissions`、`oj_submission_runs`、`oj_user_lab_best_scores` 的 `SELECT`，且默认事务只读。代码仍保留连接参数与事务级只读作为第二道防线。
+- 已提供无 DB 凭据的 `agent-report-api`：验证 Plat101 的 Ed25519 签名请求，持久化异步 run，并通过完整 workspace 与 typed tools 审查单个 Submission。
+- 旧的 DB 直连 `nightly` CronJob 已暂停；Plat101 的 02:00 Asia/Shanghai
+  定时入口按权威最高分选择提交、签名后逐份入队，并固定使用 `glm-5.3`。
+- 正式 API 已切换到无 DB 凭据的 Agent 路径：完整 workspace、只读 typed tools、
+  native tool-call loop 和证据引用校验；当前 worker 仍是单 Pod 内的临时 executor，
+  后续可替换为隔离 Kubernetes Job 而不改变签名 API。
+- 旧审查命令仍保留只读 DB adapter 以便回溯；新的 Agent API、workspace preparer 和 worker 均不持有 DB 凭据。
 
 ## 正式审查入口
 

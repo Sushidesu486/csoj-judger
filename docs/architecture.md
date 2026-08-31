@@ -2,6 +2,10 @@
 
 状态：Draft，等待确认测试 seam 后进入实现。
 
+本文记录当前 batch、相似检测和同步单提交审查架构。单提交违规优化审查拟迁移到
+隔离 Agent Job，控制面、异步 API、tool broker 和安全边界见
+[`agent-review-design.md`](agent-review-design.md)；代码查重仍沿用本文的相似检测链路。
+
 ## 总体数据流
 
 ```mermaid

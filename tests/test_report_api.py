@@ -1,6 +1,8 @@
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
+from oj_checker.agent_runs import FileAgentRunService
 from oj_checker.report_api import (
     ComplianceApi,
     FileComplianceReportReader,
@@ -171,6 +173,108 @@ def test_api_post_reports_failed_review_without_claiming_compliance(tmp_path) ->
         "state": "failed",
         "run_id": "manual-run",
         "error": "ReviewError",
+    }
+
+
+def test_api_accepts_signed_agent_run_and_exposes_polling_endpoints(tmp_path) -> None:
+    now = datetime(2026, 8, 30, 2, 5, tzinfo=UTC)
+    runs = FileAgentRunService(
+        tmp_path,
+        public_keys={
+            "plat101-review-2026-01": bytes.fromhex(
+                "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+            )
+        },
+        allowed_models=("glm-5.3", "gpt-5.6-luna"),
+        clock=lambda: now,
+    )
+    api = ComplianceApi(
+        FileComplianceReportReader(tmp_path, refresh_seconds=0),
+        FakeLauncher(),
+        allowed_models=("glm-5.3", "gpt-5.6-luna"),
+        auth_token="secret",
+        agent_runs=runs,
+    )
+    envelope = Path("tests/fixtures/review_bundle_v1.json").read_bytes()
+
+    accepted = api.handle(
+        "POST",
+        "/v1/compliance/review-runs",
+        {"Authorization": "Bearer secret"},
+        envelope,
+    )
+    created = json.loads(accepted.body)
+    polled = api.handle(
+        "GET",
+        f"/v1/compliance/review-runs/{created['run_id']}",
+        {"Authorization": "Bearer secret"},
+    )
+    latest = api.handle(
+        "GET",
+        "/v1/compliance/submissions/00000000-0000-4000-8000-000000000001/"
+        "review-runs/latest",
+        {"Authorization": "Bearer secret"},
+    )
+    batch = api.handle(
+        "POST",
+        "/v1/compliance/review-runs/latest:batch",
+        {"Authorization": "Bearer secret"},
+        json.dumps(
+            {
+                "submission_ids": [
+                    "00000000-0000-4000-8000-000000000001",
+                    "00000000-0000-4000-8000-000000000002",
+                ]
+            }
+        ).encode(),
+    )
+
+    assert accepted.status == 202
+    assert created["state"] == "queued"
+    assert polled.status == 200
+    assert json.loads(polled.body)["run_id"] == created["run_id"]
+    assert latest.status == 200
+    assert json.loads(latest.body)["run_id"] == created["run_id"]
+    assert batch.status == 200
+    assert json.loads(batch.body) == {
+        "items": [
+            {
+                "created_at": created["created_at"],
+                "model": created["model"],
+                "run_id": created["run_id"],
+                "source": created["source"],
+                "state": "queued",
+                "submission_id": "00000000-0000-4000-8000-000000000001",
+                "updated_at": created["updated_at"],
+            }
+        ]
+    }
+
+
+def test_api_rejects_unsigned_agent_run_without_exposing_details(tmp_path) -> None:
+    runs = FileAgentRunService(
+        tmp_path,
+        public_keys={"plat101-review-2026-01": b"p" * 32},
+        allowed_models=("gpt-5.6-luna",),
+        clock=lambda: datetime(2026, 8, 30, 2, 5, tzinfo=UTC),
+    )
+    api = ComplianceApi(
+        FileComplianceReportReader(tmp_path),
+        FakeLauncher(),
+        allowed_models=("gpt-5.6-luna",),
+        agent_runs=runs,
+    )
+
+    response = api.handle(
+        "POST",
+        "/v1/compliance/review-runs",
+        body=Path("tests/fixtures/review_bundle_v1.json").read_bytes(),
+    )
+
+    assert response.status == 400
+    assert json.loads(response.body) == {
+        "code": "INVALID_REVIEW_BUNDLE",
+        "message": "review bundle verification failed",
     }
 
 

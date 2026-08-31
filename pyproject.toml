@@ -9,6 +9,7 @@ description = "Read-only compliance auditor for the HPC101 online judge"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+  "cryptography>=43,<46",
   "psycopg[binary]>=3.2.9,<4",
 ]
 
