@@ -61,6 +61,22 @@ def verify_review_bundle(
     accepted for callers that already decoded their key material.
     """
 
+    payload, payload_bytes, payload_digest, key_id = _verify_signed_payload(
+        envelope, public_keys
+    )
+    _validate_payload(payload, now=now)
+    return VerifiedReviewBundle(
+        payload=payload,
+        payload_bytes=payload_bytes,
+        payload_digest=payload_digest,
+        key_id=key_id,
+    )
+
+
+def _verify_signed_payload(
+    envelope: bytes | bytearray | str | Mapping[str, Any],
+    public_keys: Mapping[str, bytes | bytearray | str],
+) -> tuple[dict[str, Any], bytes, str, str]:
     parsed_envelope = _parse_envelope(envelope)
     key_id = parsed_envelope["key_id"]
     raw_key = public_keys.get(key_id)
@@ -75,20 +91,13 @@ def verify_review_bundle(
         Ed25519PublicKey.from_public_bytes(public_key).verify(signature, payload_bytes)
     except InvalidSignature as error:
         raise ReviewBundleError("invalid bundle signature") from error
-
     try:
         payload = json.loads(payload_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ReviewBundleError("signed payload must be UTF-8 JSON") from error
     if not isinstance(payload, dict):
         raise ReviewBundleError("signed payload must be a JSON object")
-    _validate_payload(payload, now=now)
-    return VerifiedReviewBundle(
-        payload=payload,
-        payload_bytes=payload_bytes,
-        payload_digest=hashlib.sha256(payload_bytes).hexdigest(),
-        key_id=key_id,
-    )
+    return payload, payload_bytes, hashlib.sha256(payload_bytes).hexdigest(), key_id
 
 
 def submission_from_review_bundle(bundle: VerifiedReviewBundle) -> Submission:

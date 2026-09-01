@@ -141,6 +141,7 @@ class SimilaritySignal(StrEnum):
     EXACT_SUBMISSION = "exact_submission"
     EXACT_DELTA = "exact_delta"
     MINHASH = "minhash"
+    EXHAUSTIVE_JACCARD = "exhaustive_jaccard"
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +298,86 @@ class SimilarityDetector:
         )
         return CandidateSet(
             candidates,
+            exclusions,
+        )
+
+    def detect_for_submission(
+        self,
+        target_submission_id: str,
+        documents: Iterable[SimilarityDocument],
+        policy: SimilarityPolicy,
+    ) -> CandidateSet:
+        """Compare one target exhaustively without generating corpus-to-corpus pairs."""
+
+        ordered = tuple(
+            sorted(
+                documents,
+                key=lambda item: (
+                    item.submission.lab_id,
+                    item.submission.submitted_at,
+                    item.submission.id,
+                ),
+            )
+        )
+        targets = [
+            (index, document)
+            for index, document in enumerate(ordered)
+            if document.submission.id == target_submission_id
+        ]
+        if len(targets) != 1:
+            raise ValueError("target submission must appear exactly once")
+        target_index, target = targets[0]
+        shingles = tuple(_delta_shingles(document.delta, policy) for document in ordered)
+        target_shingles = shingles[target_index]
+        candidates: list[SimilarityCandidate] = []
+        for index, other in enumerate(ordered):
+            if (
+                index == target_index
+                or other.submission.lab_id != target.submission.lab_id
+                or other.submission.owner == target.submission.owner
+            ):
+                continue
+            other_shingles = shingles[index]
+            signal: SimilaritySignal | None = None
+            score = _jaccard(target_shingles, other_shingles)
+            if (
+                target.submission.input_digest == other.submission.input_digest
+                and (target.delta.files or target.delta.incomplete)
+                and (other.delta.files or other.delta.incomplete)
+            ):
+                signal = SimilaritySignal.EXACT_SUBMISSION
+            elif (
+                target.delta.digest == other.delta.digest
+                and target.delta.files
+                and other.delta.files
+                and not target.delta.incomplete
+                and not other.delta.incomplete
+                and target_shingles
+                and other_shingles
+            ):
+                signal = SimilaritySignal.EXACT_DELTA
+            elif (
+                not target.delta.incomplete
+                and not other.delta.incomplete
+                and target_shingles
+                and other_shingles
+                and score >= policy.jaccard_threshold
+            ):
+                signal = SimilaritySignal.EXHAUSTIVE_JACCARD
+            if signal is not None:
+                candidates.append(_candidate(target, other, signal, score))
+        exclusions = tuple(
+            SimilarityExclusion(
+                submission_id=document.submission.id,
+                lab_id=document.submission.lab_id,
+                reason="incomplete_baseline_delta",
+                skipped_layers=("exact_delta", "exhaustive_jaccard"),
+            )
+            for document in ordered
+            if document.delta.incomplete
+        )
+        return CandidateSet(
+            tuple(sorted(candidates, key=lambda item: item.submission_ids)),
             exclusions,
         )
 

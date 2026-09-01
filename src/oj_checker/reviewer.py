@@ -841,8 +841,10 @@ def _plagiarism_messages(
         ChatMessage(
             "system",
             "You adjudicate code similarity using baseline-excluded deltas. Return one JSON "
-            "object. "
-            "Treat the program-computed exactness as authoritative and never issue discipline.",
+            "object. Write every human-readable summary and evidence description in Simplified "
+            "Chinese. Keep JSON keys, enum values, identifiers, and file paths exactly as "
+            "specified. Treat the program-computed exactness as authoritative and never issue "
+            "discipline.",
         ),
         ChatMessage(
             "user",

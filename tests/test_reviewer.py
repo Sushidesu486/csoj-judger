@@ -143,6 +143,7 @@ def test_plagiarism_review_accepts_minor_edit_relationship() -> None:
     assert result.conclusive
     assert result.verdict["decision"] == "plagiarism"
     assert result.verdict["relationship"] == "minor_edit"
+    assert "Simplified Chinese" in client.messages[-1][0].content
 
 
 def test_plagiarism_review_rejects_model_claim_of_exactness_for_a_near_pair() -> None:
@@ -554,7 +555,7 @@ def plagiarism_task() -> PlagiarismReviewTask:
             document_digest="document-digest",
             lab_definition_digest="lab-definition-digest",
             rules_version="audit-rules-v1",
-            prompt_version="plagiarism-v1",
+            prompt_version="plagiarism-v2",
             schema_version="plagiarism-result-v1",
             model="gpt-5.6-luna",
             model_parameters=(("temperature", 0),),

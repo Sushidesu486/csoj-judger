@@ -59,7 +59,7 @@ class ReviewPipeline:
     compliance_scope_builder: ComplianceReviewScopeBuilder | None = None
     compliance_prompt_version: str = "compliance-v5"
     compliance_schema_version: str = "compliance-result-v2"
-    plagiarism_prompt_version: str = "plagiarism-v1"
+    plagiarism_prompt_version: str = "plagiarism-v2"
     plagiarism_schema_version: str = "plagiarism-result-v1"
     source_policy_version: str = "source-bundle-v3"
     delta_version: str = "scoped-line-delta-v3"

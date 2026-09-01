@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
+import stat
 import threading
 import time
 import uuid
@@ -10,17 +13,32 @@ from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypeGuard, cast
 from urllib.parse import urlsplit
 
 from oj_checker.agent_runs import AgentRunError, AgentRunQueueFull
 from oj_checker.review_bundle import ReviewBundleError
 
 _COMPLIANCE_DECISIONS = frozenset({"compliant", "violation", "inconclusive"})
+_PLAGIARISM_DECISIONS = frozenset({"plagiarism", "independent", "inconclusive"})
+_PLAGIARISM_RELATIONSHIPS = frozenset(
+    {"exact", "near_identical", "minor_edit", "shared_template", "independent", "unclear"}
+)
+_SIMILARITY_SIGNALS = frozenset(
+    {"exact_submission", "exact_delta", "minhash", "exhaustive_jaccard"}
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class ComplianceReportReader(Protocol):
     def get_submission_report(self, submission_id: str) -> dict[str, Any] | None: ...
+
+    def refresh(self) -> None: ...
+
+
+class PlagiarismReportReader(Protocol):
+    def get_submission_reports(self, submission_id: str) -> list[dict[str, Any]]: ...
 
     def refresh(self) -> None: ...
 
@@ -37,6 +55,14 @@ class AgentRunService(Protocol):
     def latest(self, submission_id: str) -> dict[str, Any] | None: ...
 
     def latest_many(self, submission_ids: Iterable[str]) -> dict[str, dict[str, Any]]: ...
+
+
+class PlagiarismRunService(Protocol):
+    def create(self, envelope: bytes) -> dict[str, Any]: ...
+
+    def get(self, run_id: str) -> dict[str, Any]: ...
+
+    def latest(self, submission_id: str) -> dict[str, Any] | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +238,261 @@ class FileComplianceReportReader:
         return submission_id, (completed_sort, review_key), report
 
 
+class FilePlagiarismReportReader:
+    """Index immutable pair reviews by both participating submissions."""
+
+    def __init__(self, root: str | Path, *, refresh_seconds: float = 30.0) -> None:
+        if refresh_seconds < 0:
+            raise ValueError("refresh_seconds must not be negative")
+        self._root = Path(root)
+        self._refresh_seconds = refresh_seconds
+        self._lock = threading.Lock()
+        self._indexed_at = 0.0
+        self._reports: dict[str, list[dict[str, Any]]] = {}
+
+    def get_submission_reports(self, submission_id: str) -> list[dict[str, Any]]:
+        self._refresh_if_needed()
+        return [dict(report) for report in self._reports.get(submission_id, ())]
+
+    def refresh(self) -> None:
+        with self._lock:
+            self._reports = self._build_index()
+            self._indexed_at = time.monotonic()
+
+    def _refresh_if_needed(self) -> None:
+        now = time.monotonic()
+        if now - self._indexed_at < self._refresh_seconds:
+            return
+        with self._lock:
+            now = time.monotonic()
+            if now - self._indexed_at < self._refresh_seconds:
+                return
+            self._reports = self._build_index()
+            self._indexed_at = now
+
+    def _build_index(self) -> dict[str, list[dict[str, Any]]]:
+        indexed: dict[str, dict[str, tuple[tuple[float, str], dict[str, Any]]]] = {}
+        plagiarism_root = self._root / "plagiarism"
+        if not plagiarism_root.is_dir() or plagiarism_root.is_symlink():
+            return {}
+        for report_path in plagiarism_root.glob("*/*.json"):
+            if (
+                report_path.is_symlink()
+                or report_path.parent.is_symlink()
+                or not report_path.is_file()
+            ):
+                continue
+            candidate = self._read_report(report_path)
+            if candidate is None:
+                continue
+            submission_ids, sort_key, reports = candidate
+            for submission_id, report in zip(submission_ids, reports, strict=True):
+                counterpart = cast(dict[str, Any], report["counterpart"])
+                counterpart_id = cast(str, counterpart["submission_id"])
+                by_counterpart = indexed.setdefault(submission_id, {})
+                current = by_counterpart.get(counterpart_id)
+                if current is None or sort_key > current[0]:
+                    by_counterpart[counterpart_id] = (sort_key, report)
+        return {
+            submission_id: [
+                report
+                for _, report in sorted(
+                    by_counterpart.values(), key=lambda candidate: candidate[0], reverse=True
+                )
+            ]
+            for submission_id, by_counterpart in indexed.items()
+        }
+
+    @staticmethod
+    def _read_report(
+        report_path: Path,
+    ) -> tuple[tuple[str, str], tuple[float, str], tuple[dict[str, Any], dict[str, Any]]] | None:
+        try:
+            payload = _read_bounded_json_object(report_path, max_bytes=2 << 20)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            return None
+        if payload.get("kind") != "plagiarism_review":
+            return None
+        review = payload.get("review")
+        if not isinstance(review, dict):
+            return None
+        identity = review.get("identity")
+        verdict = review.get("verdict")
+        if not isinstance(identity, dict) or not isinstance(verdict, dict):
+            return None
+        submission_ids = _canonical_uuid_pair(payload.get("submission_ids"))
+        identity_ids = _canonical_uuid_pair(identity.get("submission_ids"))
+        if submission_ids is None or identity_ids != submission_ids:
+            return None
+        owners = payload.get("owners")
+        submitted_at = payload.get("submitted_at")
+        if not _string_pair(owners) or not _string_pair(submitted_at):
+            return None
+        if any(_aware_timestamp(value) is None for value in submitted_at):
+            return None
+        lab_id = identity.get("lab_id")
+        review_key = review.get("review_key")
+        task_key = payload.get("task_key")
+        completed_at = review.get("completed_at")
+        model = identity.get("model")
+        if (
+            identity.get("task_type") != "plagiarism"
+            or not isinstance(lab_id, str)
+            or not lab_id
+            or not isinstance(review_key, str)
+            or len(review_key) != 64
+            or any(character not in "0123456789abcdef" for character in review_key)
+            or task_key != review_key
+            or not isinstance(completed_at, str)
+            or not isinstance(model, str)
+            or not model
+        ):
+            return None
+        completed_timestamp = _aware_timestamp(completed_at)
+        if completed_timestamp is None:
+            return None
+        decision = verdict.get("decision")
+        relationship = verdict.get("relationship")
+        conclusive = review.get("conclusive")
+        confidence = verdict.get("confidence")
+        summary = verdict.get("summary")
+        signal = payload.get("similarity_signal")
+        jaccard = payload.get("jaccard")
+        human_review_status = payload.get("human_review_status")
+        evidence = verdict.get("evidence")
+        if (
+            decision not in _PLAGIARISM_DECISIONS
+            or relationship not in _PLAGIARISM_RELATIONSHIPS
+            or not isinstance(conclusive, bool)
+            or conclusive != (decision != "inconclusive")
+            or isinstance(confidence, bool)
+            or not isinstance(confidence, int | float)
+            or not 0 <= confidence <= 1
+            or not isinstance(summary, str)
+            or signal not in _SIMILARITY_SIGNALS
+            or isinstance(jaccard, bool)
+            or not isinstance(jaccard, int | float)
+            or not 0 <= jaccard <= 1
+            or human_review_status != "pending"
+            or not isinstance(evidence, list)
+        ):
+            return None
+        normalized_evidence: list[dict[str, str]] = []
+        for item in evidence:
+            if not isinstance(item, dict):
+                return None
+            first_path = item.get("first_path")
+            second_path = item.get("second_path")
+            description = item.get("description")
+            if not all(isinstance(value, str) for value in (first_path, second_path, description)):
+                return None
+            normalized_evidence.append(
+                {
+                    "first_path": cast(str, first_path),
+                    "second_path": cast(str, second_path),
+                    "description": cast(str, description),
+                }
+            )
+        common = {
+            "review_key": review_key,
+            "lab_id": lab_id,
+            "decision": decision,
+            "relationship": relationship,
+            "similarity": {"signal": signal, "jaccard": jaccard},
+            "confidence": confidence,
+            "summary": summary,
+            "completed_at": completed_at,
+            "model": model,
+            "human_review_status": human_review_status,
+        }
+        reports = tuple(
+            {
+                **common,
+                "counterpart": {
+                    "submission_id": submission_ids[1 - index],
+                    "owner": owners[1 - index],
+                    "submitted_at": submitted_at[1 - index],
+                },
+                "evidence": [
+                    {
+                        "submission_path": item["first_path" if index == 0 else "second_path"],
+                        "counterpart_path": item["second_path" if index == 0 else "first_path"],
+                        "description": item["description"],
+                    }
+                    for item in normalized_evidence
+                ],
+            }
+            for index in range(2)
+        )
+        return (
+            submission_ids,
+            (completed_timestamp, review_key),
+            cast(tuple[dict[str, Any], dict[str, Any]], reports),
+        )
+
+
+def _read_bounded_json_object(path: Path, *, max_bytes: int) -> dict[str, Any]:
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > max_bytes:
+            raise ValueError("report is not a bounded regular file")
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        content = b"".join(chunks)
+        if len(content) > max_bytes:
+            raise ValueError("report exceeds the size limit")
+        value = json.loads(content.decode("utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("report must be a JSON object")
+        return value
+    finally:
+        os.close(descriptor)
+
+
+def _canonical_uuid_pair(value: Any) -> tuple[str, str] | None:
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or not all(isinstance(item, str) for item in value)
+    ):
+        return None
+    try:
+        pair = tuple(str(uuid.UUID(item)) for item in value)
+    except ValueError:
+        return None
+    if tuple(value) != pair or pair[0] == pair[1]:
+        return None
+    return cast(tuple[str, str], pair)
+
+
+def _string_pair(value: Any) -> TypeGuard[list[str]]:
+    return (
+        isinstance(value, list)
+        and len(value) == 2
+        and all(isinstance(item, str) and item for item in value)
+    )
+
+
+def _aware_timestamp(value: str) -> float | None:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.timestamp()
+
+
 @dataclass(frozen=True, slots=True)
 class ApiResponse:
     status: int
@@ -219,7 +500,7 @@ class ApiResponse:
 
 
 class ComplianceApi:
-    """Small HTTP adapter exposing only one-submission compliance operations."""
+    """Small HTTP adapter exposing authenticated single-submission checker operations."""
 
     def __init__(
         self,
@@ -230,6 +511,8 @@ class ComplianceApi:
         auth_token: str | None = None,
         max_body_bytes: int = 2 << 20,
         agent_runs: AgentRunService | None = None,
+        plagiarism_reader: PlagiarismReportReader | None = None,
+        plagiarism_runs: PlagiarismRunService | None = None,
     ) -> None:
         if max_body_bytes <= 0:
             raise ValueError("max_body_bytes must be positive")
@@ -243,6 +526,8 @@ class ComplianceApi:
         self._auth_token = auth_token
         self._max_body_bytes = max_body_bytes
         self._agent_runs = agent_runs
+        self._plagiarism_reader = plagiarism_reader
+        self._plagiarism_runs = plagiarism_runs
         self._launch_lock = threading.Lock()
 
     def handle(
@@ -266,6 +551,81 @@ class ComplianceApi:
             )
 
         parts = [part for part in path.split("/") if part]
+        if len(parts) == 4 and parts[:3] == ["v1", "plagiarism", "submissions"]:
+            if method != "GET":
+                return self._error(
+                    HTTPStatus.METHOD_NOT_ALLOWED,
+                    "METHOD_NOT_ALLOWED",
+                    "method not allowed",
+                )
+            submission_id = self._normalize_submission_id(parts[3])
+            if submission_id is None:
+                return self._error(
+                    HTTPStatus.BAD_REQUEST,
+                    "BAD_REQUEST",
+                    "submission_id must be a UUID",
+                )
+            if self._plagiarism_reader is None:
+                return self._error(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "PLAGIARISM_REPORTS_DISABLED",
+                    "plagiarism reports are not configured",
+                )
+            try:
+                reports = self._plagiarism_reader.get_submission_reports(submission_id)
+            except Exception:
+                return self._error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "PLAGIARISM_REPORT_READ_FAILED",
+                    "plagiarism reports could not be read",
+                )
+            return self._json(
+                HTTPStatus.OK,
+                {
+                    "schema_version": 1,
+                    "submission_id": submission_id,
+                    "items": reports,
+                },
+            )
+
+        if parts == ["v1", "plagiarism", "review-runs"]:
+            if method != "POST":
+                return self._error(
+                    HTTPStatus.METHOD_NOT_ALLOWED,
+                    "METHOD_NOT_ALLOWED",
+                    "method not allowed",
+                )
+            return self._create_plagiarism_run(body)
+
+        if len(parts) == 4 and parts[:3] == ["v1", "plagiarism", "review-runs"]:
+            if method != "GET":
+                return self._error(
+                    HTTPStatus.METHOD_NOT_ALLOWED,
+                    "METHOD_NOT_ALLOWED",
+                    "method not allowed",
+                )
+            return self._get_plagiarism_run(parts[3])
+
+        if (
+            len(parts) == 6
+            and parts[:3] == ["v1", "plagiarism", "submissions"]
+            and parts[4:] == ["review-runs", "latest"]
+        ):
+            if method != "GET":
+                return self._error(
+                    HTTPStatus.METHOD_NOT_ALLOWED,
+                    "METHOD_NOT_ALLOWED",
+                    "method not allowed",
+                )
+            submission_id = self._normalize_submission_id(parts[3])
+            if submission_id is None:
+                return self._error(
+                    HTTPStatus.BAD_REQUEST,
+                    "BAD_REQUEST",
+                    "submission_id must be a UUID",
+                )
+            return self._latest_plagiarism_run(submission_id)
+
         if parts == ["v1", "compliance", "models"]:
             if method != "GET":
                 return self._error(
@@ -392,6 +752,94 @@ class ComplianceApi:
                 "review run could not be created",
             )
         return self._json(HTTPStatus.ACCEPTED, run)
+
+    def _create_plagiarism_run(self, body: bytes) -> ApiResponse:
+        if self._plagiarism_runs is None:
+            return self._error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "PLAGIARISM_RUNS_DISABLED",
+                "plagiarism review runs are not configured",
+            )
+        try:
+            run = self._plagiarism_runs.create(body)
+        except ReviewBundleError as error:
+            _LOGGER.warning("plagiarism bundle verification failed: %s", error)
+            return self._error(
+                HTTPStatus.BAD_REQUEST,
+                "INVALID_PLAGIARISM_BUNDLE",
+                "plagiarism bundle verification failed",
+            )
+        except AgentRunQueueFull:
+            return self._error(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                "PLAGIARISM_QUEUE_FULL",
+                "plagiarism review queue is full",
+            )
+        except AgentRunError:
+            return self._error(
+                HTTPStatus.BAD_REQUEST,
+                "INVALID_PLAGIARISM_REQUEST",
+                "plagiarism review request is invalid",
+            )
+        except Exception:
+            return self._error(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "PLAGIARISM_RUN_CREATE_FAILED",
+                "plagiarism review run could not be created",
+            )
+        return self._json(HTTPStatus.ACCEPTED, run)
+
+    def _get_plagiarism_run(self, run_id: str) -> ApiResponse:
+        if self._plagiarism_runs is None:
+            return self._error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "PLAGIARISM_RUNS_DISABLED",
+                "plagiarism review runs are not configured",
+            )
+        try:
+            run = self._plagiarism_runs.get(run_id)
+        except (LookupError, AgentRunError):
+            return self._error(
+                HTTPStatus.NOT_FOUND,
+                "PLAGIARISM_RUN_NOT_FOUND",
+                "plagiarism review run was not found",
+            )
+        except Exception:
+            return self._error(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "PLAGIARISM_RUN_READ_FAILED",
+                "plagiarism review run could not be read",
+            )
+        return self._json(HTTPStatus.OK, run)
+
+    def _latest_plagiarism_run(self, submission_id: str) -> ApiResponse:
+        if self._plagiarism_runs is None:
+            return self._error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "PLAGIARISM_RUNS_DISABLED",
+                "plagiarism review runs are not configured",
+            )
+        try:
+            run = self._plagiarism_runs.latest(submission_id)
+        except AgentRunError:
+            return self._error(
+                HTTPStatus.BAD_REQUEST,
+                "INVALID_PLAGIARISM_REQUEST",
+                "plagiarism review request is invalid",
+            )
+        except Exception:
+            return self._error(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "PLAGIARISM_RUN_READ_FAILED",
+                "plagiarism review run could not be read",
+            )
+        if run is None:
+            return self._error(
+                HTTPStatus.NOT_FOUND,
+                "PLAGIARISM_RUN_NOT_FOUND",
+                "plagiarism review run was not found",
+            )
+        return self._json(HTTPStatus.OK, run)
 
     def _get_agent_run(self, run_id: str) -> ApiResponse:
         if self._agent_runs is None:

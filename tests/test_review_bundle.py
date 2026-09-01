@@ -9,6 +9,10 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from oj_checker.plagiarism_bundle import (
+    submissions_from_plagiarism_bundle,
+    verify_plagiarism_bundle,
+)
 from oj_checker.review_bundle import (
     ReviewBundleError,
     submission_from_review_bundle,
@@ -220,3 +224,64 @@ def test_rejects_excessively_long_validity_window() -> None:
 
     with pytest.raises(ReviewBundleError, match="exceeds 15 minutes"):
         verify_review_bundle(sign(long_lived), {KEY_ID: PUBLIC_KEY}, now=NOW)
+
+
+def plagiarism_payload() -> dict[str, Any]:
+    original = payload()
+    submission = original["submission"]
+    shared = {
+        key: submission[key]
+        for key in (
+            "id",
+            "owner",
+            "lab_id",
+            "score",
+            "input_digest",
+            "submitted_at",
+            "input_manifest",
+        )
+    }
+    counterpart = deepcopy(shared)
+    counterpart["id"] = "00000000-0000-4000-8000-000000000002"
+    counterpart["owner"] = "other-student"
+    counterpart["input_digest"] = "3" * 64
+    return {
+        "schema_version": "plagiarism-review-bundle-v1",
+        "audience": "oj-checker",
+        "target_submission_id": shared["id"],
+        "submissions": [shared, counterpart],
+        "lab_definition": submission["lab_definition"],
+        "basis": original["basis"],
+        "model": "gpt-5.6-luna",
+        "source": "manual",
+        "rules_version": "audit-rules-v2",
+        "prompt_version": "plagiarism-v2",
+        "result_schema_version": "plagiarism-result-v1",
+        "issued_at": original["issued_at"],
+        "expires_at": original["expires_at"],
+        "nonce": original["nonce"],
+    }
+
+
+def test_verifies_signed_plagiarism_bundle_and_freezes_corpus() -> None:
+    expected = plagiarism_payload()
+
+    verified = verify_plagiarism_bundle(sign(expected), {KEY_ID: PUBLIC_KEY}, now=NOW)
+    target_id, submissions = submissions_from_plagiarism_bundle(verified)
+
+    assert verified.payload == expected
+    assert target_id == "00000000-0000-4000-8000-000000000001"
+    assert [submission.owner for submission in submissions] == ["student", "other-student"]
+    assert all(submission.lab_id == "lab4-gpu" for submission in submissions)
+
+
+def test_rejects_mixed_lab_or_missing_target_plagiarism_corpus() -> None:
+    mixed = plagiarism_payload()
+    mixed["submissions"][1]["lab_id"] = "lab3"
+    with pytest.raises(ReviewBundleError, match="share one lab"):
+        verify_plagiarism_bundle(sign(mixed), {KEY_ID: PUBLIC_KEY}, now=NOW)
+
+    missing = plagiarism_payload()
+    missing["target_submission_id"] = "00000000-0000-4000-8000-000000000003"
+    with pytest.raises(ReviewBundleError, match="absent"):
+        verify_plagiarism_bundle(sign(missing), {KEY_ID: PUBLIC_KEY}, now=NOW)

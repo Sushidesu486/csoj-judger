@@ -63,6 +63,7 @@ GET  /v1/compliance/submissions/{submission_id}
 POST /v1/compliance/review-runs  <signed review-bundle-v1 envelope>
 GET  /v1/compliance/review-runs/{run_id}
 GET  /v1/compliance/submissions/{submission_id}/review-runs/latest
+GET  /v1/plagiarism/submissions/{submission_id}
 ```
 
 ## Nightly compliance review

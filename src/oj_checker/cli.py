@@ -17,10 +17,13 @@ from oj_checker.agent_workspace import AgentWorkspacePreparer
 from oj_checker.catalog import best_per_owner_lab
 from oj_checker.domain import AuditRequest, SelectionPolicy, SnapshotRequest
 from oj_checker.nightly import REVIEW_LABS, HTTPComplianceClient, NightlyReviewRunner
+from oj_checker.plagiarism_execution import LocalPlagiarismRunExecutor
+from oj_checker.plagiarism_runs import FilePlagiarismRunService
 from oj_checker.postgres_catalog import PostgresSubmissionCatalog
 from oj_checker.report_api import (
     ComplianceApi,
     FileComplianceReportReader,
+    FilePlagiarismReportReader,
     ReviewLaunchResult,
     RunnerReviewLauncher,
     serve_report_api,
@@ -254,7 +257,7 @@ def _audit(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
             min_score=args.min_score,
             labs=(args.lab,),
             rules_version=args.rules_version,
-            prompt_version="compliance-v5+plagiarism-v1",
+            prompt_version="compliance-v5+plagiarism-v2",
             model=args.model,
             similarity_threshold=args.similarity_threshold,
             execute_reviews=True,
@@ -379,6 +382,7 @@ def _report_api(settings: Settings, args: argparse.Namespace) -> None:
         ),
         allowed_models=_parse_models(args.allowed_models),
         auth_token=args.api_token,
+        plagiarism_reader=FilePlagiarismReportReader(settings.report_root),
     )
     serve_report_api(api, args.listen)
 
@@ -526,6 +530,7 @@ def _agent_report_api(args: argparse.Namespace) -> None:
     if not llm_token:
         raise RuntimeError("LLM_API_KEY is required for the Agent report API")
     models = _parse_models(args.allowed_models)
+    public_key = _read_review_bundle_public_key(Path(args.public_key_file))
     work_root = Path(args.work_root)
     work_root.mkdir(parents=True, exist_ok=True)
     executor = LocalAgentRunExecutor(
@@ -547,25 +552,52 @@ def _agent_report_api(args: argparse.Namespace) -> None:
     )
     runs = FileAgentRunService(
         Path(args.report_root),
-        public_keys={
-            args.key_id: _read_review_bundle_public_key(Path(args.public_key_file))
-        },
+        public_keys={args.key_id: public_key},
         allowed_models=models,
         executor=executor,
         worker_count=args.worker_count,
         max_queued=args.max_queued,
+    )
+    plagiarism_runs = FilePlagiarismRunService(
+        Path(args.report_root),
+        public_keys={args.key_id: public_key},
+        allowed_models=models,
+        executor=LocalPlagiarismRunExecutor(
+            oj_root=Path(args.oj_root),
+            report_root=Path(args.report_root),
+            hpc101_repository=Path(args.hpc101_repository),
+            reviewer=OpenAICompatibleReviewer(
+                OpenAIStreamingChatClient(
+                    os.environ.get(
+                        "LLM_BASE_URL",
+                        "http://new-api.new-api.svc.cluster.local:3000/v1",
+                    ),
+                    llm_token,
+                    timeout_seconds=args.llm_timeout,
+                ),
+                clock=lambda: datetime.now(UTC),
+                max_attempts=args.max_attempts,
+            ),
+        ),
+        worker_count=args.plagiarism_worker_count,
+        max_queued=args.plagiarism_max_queued,
     )
     api = ComplianceApi(
         FileComplianceReportReader(Path(args.report_root)),
         _DisabledReviewLauncher(),
         allowed_models=models,
         auth_token=args.api_token,
+        max_body_bytes=16 << 20,
         agent_runs=runs,
+        plagiarism_reader=FilePlagiarismReportReader(Path(args.report_root)),
+        plagiarism_runs=plagiarism_runs,
     )
     runs.start()
+    plagiarism_runs.start()
     try:
         serve_report_api(api, args.listen)
     finally:
+        plagiarism_runs.close()
         runs.close()
 
 
@@ -734,7 +766,7 @@ def _parser() -> argparse.ArgumentParser:
 
     report_api = subparsers.add_parser(
         "report-api",
-        help="serve single-submission compliance report and review endpoints",
+        help="serve single-submission compliance and plagiarism report endpoints",
     )
     report_api.add_argument(
         "--listen",
@@ -783,6 +815,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     agent_api.add_argument("--worker-count", type=int, default=2)
     agent_api.add_argument("--max-queued", type=int, default=1000)
+    agent_api.add_argument("--plagiarism-worker-count", type=int, default=1)
+    agent_api.add_argument("--plagiarism-max-queued", type=int, default=100)
     agent_api.add_argument("--max-turns", type=int, default=32)
     agent_api.add_argument("--max-attempts", type=int, default=2)
     agent_api.add_argument("--llm-timeout", type=float, default=180)
