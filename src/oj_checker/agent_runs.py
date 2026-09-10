@@ -188,7 +188,7 @@ class FileAgentRunService:
             self._remember(created)
             if self._executor is not None and self._worker_count:
                 self._queue.put_nowait(run_id)
-            return dict(created)
+            return self._public_run(created)
 
     def get(self, run_id: str) -> dict[str, Any]:
         if _RUN_ID.fullmatch(run_id) is None:
@@ -196,10 +196,10 @@ class FileAgentRunService:
         with self._lock:
             cached = self._runs.get(run_id)
             if cached is not None:
-                return dict(cached)
+                return self._public_run(cached)
             response = self._read_run(self._run_root(run_id))
             self._remember(response)
-            return dict(response)
+            return self._public_run(response)
 
     def _read_run(self, run_root: Path) -> dict[str, Any]:
         metadata = _read_json_object(run_root / "metadata.json", max_bytes=64 * 1024)
@@ -221,11 +221,23 @@ class FileAgentRunService:
             return {}
         with self._lock:
             return {
-                submission_id: dict(self._runs[candidate[1]])
+                submission_id: self._public_run(self._runs[candidate[1]])
                 for submission_id in requested
                 if (candidate := self._latest_by_submission.get(submission_id)) is not None
                 and candidate[1] in self._runs
             }
+
+    def _public_run(self, run: Mapping[str, Any]) -> dict[str, Any]:
+        response = dict(run)
+        attempts = response.get("attempts")
+        response["max_attempts"] = self._max_run_attempts
+        response["will_retry"] = (
+            response.get("state") == "failed"
+            and isinstance(attempts, int)
+            and attempts < self._max_run_attempts
+            and self._is_retryable_failure(response)
+        )
+        return response
 
     def _rebuild_index(self) -> None:
         for run_root in self._safe_run_roots():

@@ -120,6 +120,9 @@ def test_create_is_persistent_idempotent_and_queryable_by_submission(tmp_path: P
 
     assert created["run_id"].startswith("review-")
     assert created["state"] == "queued"
+    assert created["attempts"] == 0
+    assert created["max_attempts"] == 3
+    assert created["will_retry"] is False
     assert repeated == created
     assert latest == created
     run_root = tmp_path / "agent-runs" / created["run_id"]
@@ -217,7 +220,11 @@ def test_reconcile_retries_transient_failure_and_completes_same_run(tmp_path: Pa
     try:
         created = runs.create(envelope())
         runs._queue.join()
-        assert runs.get(created["run_id"])["state"] == "failed"
+        failed = runs.get(created["run_id"])
+        assert failed["state"] == "failed"
+        assert failed["attempts"] == 1
+        assert failed["max_attempts"] == 2
+        assert failed["will_retry"] is True
 
         assert runs.reconcile_failed() == 1
         runs._queue.join()
@@ -227,6 +234,7 @@ def test_reconcile_retries_transient_failure_and_completes_same_run(tmp_path: Pa
 
     assert completed["state"] == "completed"
     assert completed["attempts"] == 2
+    assert completed["will_retry"] is False
     assert executor.calls == 2
 
 
@@ -296,6 +304,7 @@ def test_reconcile_does_not_retry_terminal_or_exhausted_failure(tmp_path: Path) 
         exhausted_runs.create(envelope())
         exhausted_runs._queue.join()
         assert exhausted_runs.reconcile_failed() == 0
+        assert exhausted_runs.latest(SUBMISSION_ID)["will_retry"] is False
     finally:
         exhausted_runs.close()
 
