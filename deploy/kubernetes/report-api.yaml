@@ -134,7 +134,7 @@ spec:
             - --max-queued
             - "1000"
             - --max-run-attempts
-            - "3"
+            - "4"
             - --reconcile-interval
             - "60"
             - --plagiarism-reconcile-interval

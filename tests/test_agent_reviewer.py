@@ -447,6 +447,66 @@ def test_openai_client_streams_and_reassembles_fragmented_parallel_tool_calls(
     assert result["usage"] == {"prompt_tokens": 12, "completion_tokens": 8}
 
 
+def test_openai_client_deduplicates_repeated_complete_tool_call_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = streaming_response(
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_lines",
+                                    "arguments": '{"root":"submission"',
+                                },
+                            }
+                        ]
+                    },
+                    "finish_reason": None,
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-1",
+                                "function": {"arguments": ',"path":"main.cpp"}'},
+                            }
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        },
+        "[DONE]",
+    )
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: response)
+
+    result = OpenAICompatibleToolChatClient(
+        "https://newapi.example/v1", "token"
+    ).complete(
+        model="gpt-5.6-luna",
+        messages=[],
+        tools=[],
+        parameters={},
+    )
+
+    call = result["choices"][0]["message"]["tool_calls"][0]
+    assert call["id"] == "call-1"
+    assert call["function"]["arguments"] == '{"root":"submission","path":"main.cpp"}'
+
+
 def test_openai_client_rejects_malformed_sse_without_echoing_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

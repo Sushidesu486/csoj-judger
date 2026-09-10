@@ -442,7 +442,12 @@ def _merge_streaming_tool_call(
     if raw_id is not None:
         if not isinstance(raw_id, str):
             raise AgentReviewError("model endpoint returned malformed stream tool-call id")
-        call["id"] += raw_id
+        current_id = call["id"]
+        if raw_id != current_id:
+            merged_id = raw_id if raw_id.startswith(current_id) else current_id + raw_id
+            if len(merged_id) > 64:
+                raise AgentReviewError("model endpoint returned an oversized tool-call id")
+            call["id"] = merged_id
     raw_type = raw_call.get("type")
     if raw_type is not None:
         if not isinstance(raw_type, str):
