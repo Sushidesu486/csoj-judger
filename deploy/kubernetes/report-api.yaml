@@ -169,7 +169,7 @@ spec:
             - name: LAB4_REFERENCE_LABEL
               value: xiaoqu0000/NR-amssncku
             - name: REPORT_API_ALLOWED_MODELS
-              value: glm-5.3,gpt-5.6-luna
+              value: gpt-5.6-luna
             - name: REVIEW_BUNDLE_KEY_ID
               value: plat101-review-2026-01
             - name: REPORT_API_TOKEN
