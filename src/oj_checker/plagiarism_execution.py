@@ -26,7 +26,12 @@ from oj_checker.similarity import (
     SimilarityDocument,
     SimilarityPolicy,
 )
-from oj_checker.submission_store import NfsSubmissionStore, SourcePolicy, UnsafeSubmissionPath
+from oj_checker.submission_store import (
+    NfsSubmissionStore,
+    SourcePolicy,
+    SubmissionFileError,
+    UnsafeSubmissionPath,
+)
 
 
 class LocalPlagiarismRunExecutor:
@@ -36,6 +41,7 @@ class LocalPlagiarismRunExecutor:
         self,
         *,
         oj_root: str | Path,
+        oj_archive_root: str | Path | None = None,
         report_root: str | Path,
         hpc101_repository: str | Path,
         reviewer: Reviewer,
@@ -44,7 +50,7 @@ class LocalPlagiarismRunExecutor:
     ) -> None:
         if max_candidates <= 0:
             raise ValueError("max_candidates must be positive")
-        self._store = NfsSubmissionStore(oj_root)
+        self._store = NfsSubmissionStore(oj_root, archive_root=oj_archive_root)
         self._report_store = FileReportStore(report_root)
         self._report_reader = FilePlagiarismReportReader(report_root, refresh_seconds=0)
         self._ledger = FileReviewLedger(report_root)
@@ -90,7 +96,13 @@ class LocalPlagiarismRunExecutor:
                 source = self._store.load_bundle(submission, self._source_policy)
                 delta = delta_builder.build(source, basis)
                 documents[submission.id] = SimilarityDocument(submission, delta)
-        except (FileNotFoundError, OSError, UnsafeSubmissionPath, ValueError) as error:
+        except (
+            FileNotFoundError,
+            OSError,
+            SubmissionFileError,
+            UnsafeSubmissionPath,
+            ValueError,
+        ) as error:
             raise AgentRunFailure("SOURCE_BUNDLE_INVALID") from error
         candidates = SimilarityDetector(max_workers=1).detect_for_submission(
             target_id,

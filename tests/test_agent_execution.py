@@ -84,6 +84,26 @@ def test_local_executor_rejects_signed_basis_that_is_not_present_locally(
     assert list(work_root.iterdir()) == []
 
 
+def test_local_executor_classifies_missing_submission_file(tmp_path: Path) -> None:
+    repository, revision = baseline_repository(tmp_path)
+    review_basis = GitReviewBasisProvider(repository, revision).load("lab2")
+    work_root = tmp_path / "work"
+    work_root.mkdir()
+    executor = LocalAgentRunExecutor(
+        oj_root=tmp_path / "missing-oj",
+        hpc101_repository=repository,
+        lab4_reference_repository=tmp_path / "unused-reference",
+        lab4_reference_label="xiaoqu0000/NR-amssncku",
+        work_root=work_root,
+        client=FinishClient(),
+    )
+
+    with pytest.raises(AgentRunFailure) as failure:
+        executor.execute(bundle(review_basis, b"missing source\n"))
+
+    assert failure.value.code == "WORKSPACE_INVALID"
+
+
 def test_plagiarism_executor_compares_only_target_and_persists_oriented_report(
     tmp_path: Path,
 ) -> None:
@@ -115,6 +135,22 @@ def test_plagiarism_executor_compares_only_target_and_persists_oriented_report(
     assert result["items"][0]["counterpart"]["submission_id"] == counterpart_id
     assert result["items"][0]["similarity"]["signal"] == "exact_delta"
     assert reviewer.calls == 1
+
+
+def test_plagiarism_executor_classifies_missing_submission_file(tmp_path: Path) -> None:
+    repository, revision = baseline_repository(tmp_path)
+    review_basis = GitReviewBasisProvider(repository, revision).load("lab2")
+    executor = LocalPlagiarismRunExecutor(
+        oj_root=tmp_path / "missing-oj",
+        report_root=tmp_path / "reports",
+        hpc101_repository=repository,
+        reviewer=IndependentPlagiarismReviewer(),
+    )
+
+    with pytest.raises(AgentRunFailure) as failure:
+        executor.execute(plagiarism_bundle(review_basis, b"missing source\n"))
+
+    assert failure.value.code == "SOURCE_BUNDLE_INVALID"
 
 
 def baseline_repository(tmp_path: Path) -> tuple[Path, str]:

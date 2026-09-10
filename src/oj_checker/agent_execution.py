@@ -24,7 +24,7 @@ from oj_checker.review_scope import (
     GitLab4ReferenceProvider,
     ReferenceSnapshot,
 )
-from oj_checker.submission_store import UnsafeSubmissionPath
+from oj_checker.submission_store import SubmissionFileError, UnsafeSubmissionPath
 
 _LAB4_IDS = frozenset({"lab4-cpu", "lab4-gpu"})
 _LOGGER = logging.getLogger(__name__)
@@ -44,6 +44,7 @@ class LocalAgentRunExecutor:
         self,
         *,
         oj_root: str | Path,
+        oj_archive_root: str | Path | None = None,
         hpc101_repository: str | Path,
         lab4_reference_repository: str | Path,
         lab4_reference_label: str,
@@ -53,6 +54,7 @@ class LocalAgentRunExecutor:
         max_attempts: int = 2,
     ) -> None:
         self._oj_root = Path(oj_root)
+        self._oj_archive_root = Path(oj_archive_root) if oj_archive_root is not None else None
         self._hpc101_repository = Path(hpc101_repository)
         self._lab4_reference_repository = Path(lab4_reference_repository)
         self._lab4_reference_label = lab4_reference_label
@@ -113,7 +115,10 @@ class LocalAgentRunExecutor:
                 dir=self._work_root,
             ) as temporary:
                 workspace_root = Path(temporary) / "workspace"
-                prepared = AgentWorkspacePreparer(self._oj_root).prepare(
+                prepared = AgentWorkspacePreparer(
+                    self._oj_root,
+                    archive_root=self._oj_archive_root,
+                ).prepare(
                     submission,
                     basis,
                     workspace_root,
@@ -133,7 +138,7 @@ class LocalAgentRunExecutor:
                     policy=policy,
                     submission=submission_metadata,
                 )
-        except UnsafeSubmissionPath as error:
+        except (SubmissionFileError, UnsafeSubmissionPath) as error:
             raise AgentRunFailure("WORKSPACE_INVALID") from error
         except TransientAgentReviewError as error:
             raise AgentRunFailure("MODEL_UNAVAILABLE") from error

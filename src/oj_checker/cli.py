@@ -384,7 +384,7 @@ def _report_api(settings: Settings, args: argparse.Namespace) -> None:
         auth_token=args.api_token,
         plagiarism_reader=FilePlagiarismReportReader(settings.report_root),
     )
-    serve_report_api(api, args.listen)
+    serve_report_api(api, args.listen, max_request_threads=args.max_request_threads)
 
 
 def _nightly(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
@@ -535,6 +535,7 @@ def _agent_report_api(args: argparse.Namespace) -> None:
     work_root.mkdir(parents=True, exist_ok=True)
     executor = LocalAgentRunExecutor(
         oj_root=Path(args.oj_root),
+        oj_archive_root=Path(args.oj_archive_root) if args.oj_archive_root else None,
         hpc101_repository=Path(args.hpc101_repository),
         lab4_reference_repository=Path(args.lab4_reference_repository),
         lab4_reference_label=args.lab4_reference_label,
@@ -557,6 +558,9 @@ def _agent_report_api(args: argparse.Namespace) -> None:
         executor=executor,
         worker_count=args.worker_count,
         max_queued=args.max_queued,
+        max_run_attempts=args.max_run_attempts,
+        reconcile_interval_seconds=args.reconcile_interval,
+        reconcile_batch_size=args.reconcile_batch_size,
     )
     plagiarism_runs = FilePlagiarismRunService(
         Path(args.report_root),
@@ -564,6 +568,7 @@ def _agent_report_api(args: argparse.Namespace) -> None:
         allowed_models=models,
         executor=LocalPlagiarismRunExecutor(
             oj_root=Path(args.oj_root),
+            oj_archive_root=Path(args.oj_archive_root) if args.oj_archive_root else None,
             report_root=Path(args.report_root),
             hpc101_repository=Path(args.hpc101_repository),
             reviewer=OpenAICompatibleReviewer(
@@ -581,6 +586,9 @@ def _agent_report_api(args: argparse.Namespace) -> None:
         ),
         worker_count=args.plagiarism_worker_count,
         max_queued=args.plagiarism_max_queued,
+        max_run_attempts=args.max_run_attempts,
+        reconcile_interval_seconds=args.reconcile_interval,
+        reconcile_batch_size=args.reconcile_batch_size,
     )
     api = ComplianceApi(
         FileComplianceReportReader(Path(args.report_root)),
@@ -595,7 +603,7 @@ def _agent_report_api(args: argparse.Namespace) -> None:
     runs.start()
     plagiarism_runs.start()
     try:
-        serve_report_api(api, args.listen)
+        serve_report_api(api, args.listen, max_request_threads=args.max_request_threads)
     finally:
         plagiarism_runs.close()
         runs.close()
@@ -781,6 +789,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     report_api.add_argument("--min-score", type=int, default=0)
     report_api.add_argument("--api-token", default=os.environ.get("REPORT_API_TOKEN"))
+    report_api.add_argument("--max-request-threads", type=int, default=32)
 
     agent_api = subparsers.add_parser(
         "agent-report-api",
@@ -797,6 +806,7 @@ def _parser() -> argparse.ArgumentParser:
     agent_api.add_argument("--api-token", default=os.environ.get("REPORT_API_TOKEN"))
     agent_api.add_argument("--report-root", default=os.environ.get("REPORT_ROOT", "audit-reports"))
     agent_api.add_argument("--oj-root", default=os.environ.get("OJ_ROOT", "/data/.oj"))
+    agent_api.add_argument("--oj-archive-root", default=os.environ.get("OJ_ARCHIVE_ROOT"))
     agent_api.add_argument(
         "--hpc101-repository",
         default=os.environ.get("HPC101_REPOSITORY", "/baseline/HPC101"),
@@ -819,6 +829,10 @@ def _parser() -> argparse.ArgumentParser:
     agent_api.add_argument("--plagiarism-max-queued", type=int, default=100)
     agent_api.add_argument("--max-turns", type=int, default=32)
     agent_api.add_argument("--max-attempts", type=int, default=2)
+    agent_api.add_argument("--max-run-attempts", type=int, default=3)
+    agent_api.add_argument("--reconcile-interval", type=float, default=60)
+    agent_api.add_argument("--reconcile-batch-size", type=int, default=4)
+    agent_api.add_argument("--max-request-threads", type=int, default=32)
     agent_api.add_argument("--llm-timeout", type=float, default=180)
     agent_api.add_argument(
         "--key-id",

@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from http import HTTPStatus
@@ -1102,11 +1103,14 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self._write_response(response)
 
     def _write_response(self, response: ApiResponse) -> None:
-        self.send_response(response.status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(response.body)))
-        self.end_headers()
-        self.wfile.write(response.body)
+        try:
+            self.send_response(response.status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(response.body)))
+            self.end_headers()
+            self.wfile.write(response.body)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def do_GET(self) -> None:
         self._dispatch()
@@ -1118,12 +1122,70 @@ class _RequestHandler(BaseHTTPRequestHandler):
         return
 
 
-def serve_report_api(app: ComplianceApi, listen: str) -> None:
+class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        handler: type[BaseHTTPRequestHandler],
+        *,
+        max_request_threads: int,
+    ) -> None:
+        if max_request_threads <= 0:
+            raise ValueError("max_request_threads must be positive")
+        self._request_slots = threading.BoundedSemaphore(max_request_threads)
+        super().__init__(server_address, handler)
+
+    def process_request(
+        self,
+        request: Any,
+        client_address: Any,
+    ) -> None:
+        if not self._request_slots.acquire(blocking=False):
+            body = b'{"code":"SERVER_BUSY","message":"report API is at capacity"}\n'
+            response = (
+                b"HTTP/1.1 503 Service Unavailable\r\n"
+                b"Content-Type: application/json; charset=utf-8\r\n"
+                + f"Content-Length: {len(body)}\r\n".encode()
+                + b"Connection: close\r\n\r\n"
+                + body
+            )
+            with suppress(OSError):
+                request.sendall(response)
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(
+        self,
+        request: Any,
+        client_address: Any,
+    ) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
+
+
+def serve_report_api(
+    app: ComplianceApi,
+    listen: str,
+    *,
+    max_request_threads: int = 32,
+) -> None:
     host, separator, raw_port = listen.rpartition(":")
     if not separator or not host or not raw_port.isdigit():
         raise ValueError("listen must be HOST:PORT")
-    server = ThreadingHTTPServer((host, int(raw_port)), _RequestHandler)
-    server.daemon_threads = True
+    server = _BoundedThreadingHTTPServer(
+        (host, int(raw_port)),
+        _RequestHandler,
+        max_request_threads=max_request_threads,
+    )
     server.app = app  # type: ignore[attr-defined]
     try:
         server.serve_forever()

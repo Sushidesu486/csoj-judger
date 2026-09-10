@@ -1,4 +1,5 @@
 import json
+import socket
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -9,6 +10,8 @@ from oj_checker.report_api import (
     FilePlagiarismReportReader,
     ReviewLaunchResult,
     RunnerReviewLauncher,
+    _BoundedThreadingHTTPServer,
+    _RequestHandler,
 )
 
 SUBMISSION_ID = "258fb85f-897b-4f70-9a5b-b5cbf2cf91ea"
@@ -319,6 +322,28 @@ def test_api_post_reports_failed_review_without_claiming_compliance(tmp_path) ->
         "run_id": "manual-run",
         "error": "ReviewError",
     }
+
+
+def test_http_server_rejects_requests_above_thread_capacity() -> None:
+    server = _BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        _RequestHandler,
+        max_request_threads=1,
+    )
+    server_side, client_side = socket.socketpair()
+    try:
+        assert server._request_slots.acquire(blocking=False)
+
+        server.process_request(server_side, ("127.0.0.1", 1))
+
+        response = client_side.recv(4096)
+    finally:
+        client_side.close()
+        server._request_slots.release()
+        server.server_close()
+
+    assert response.startswith(b"HTTP/1.1 503 Service Unavailable")
+    assert b'"code":"SERVER_BUSY"' in response
 
 
 def test_api_accepts_signed_agent_run_and_exposes_polling_endpoints(tmp_path) -> None:

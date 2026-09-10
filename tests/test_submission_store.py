@@ -190,6 +190,22 @@ def test_load_bundle_rejects_non_regular_files(tmp_path) -> None:
         NfsSubmissionStore(tmp_path).load_bundle(submission, SourcePolicy())
 
 
+def test_load_bundle_falls_back_to_read_only_archive_root(tmp_path) -> None:
+    hot_root = tmp_path / "hot"
+    archive_root = tmp_path / "archive"
+    submission = make_submission([{"path": "student/kernel.cpp", "size": 4}])
+    input_root = archive_root / "submissions" / submission.id / "input" / "student"
+    input_root.mkdir(parents=True)
+    (input_root / "kernel.cpp").write_text("code")
+
+    bundle = NfsSubmissionStore(hot_root, archive_root=archive_root).load_bundle(
+        submission,
+        SourcePolicy(),
+    )
+
+    assert bundle.files[0].content == "code"
+
+
 def test_load_bundle_validates_files_after_total_budget_is_exhausted(tmp_path) -> None:
     submission = make_submission(
         [

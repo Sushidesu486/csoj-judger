@@ -113,6 +113,28 @@ def test_latest_many_returns_requested_runs_and_omits_missing(tmp_path: Path) ->
     assert latest == {SUBMISSION_ID: created}
 
 
+def test_latest_many_uses_memory_index_without_rescanning_run_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs = service(tmp_path)
+    created = runs.create(envelope())
+    monkeypatch.setattr(
+        runs,
+        "_safe_run_roots",
+        lambda: (_ for _ in ()).throw(AssertionError("latest query rescanned run directories")),
+    )
+
+    assert runs.latest_many((SUBMISSION_ID,)) == {SUBMISSION_ID: created}
+
+
+def test_new_service_rebuilds_latest_run_index_from_persistent_records(tmp_path: Path) -> None:
+    created = service(tmp_path).create(envelope())
+
+    recovered = service(tmp_path)
+
+    assert recovered.latest(SUBMISSION_ID) == created
+
+
 def test_create_rejects_tampering_before_writing_a_run(tmp_path: Path) -> None:
     runs = service(tmp_path)
     wire = json.loads(envelope())
@@ -159,6 +181,58 @@ def test_worker_exposes_only_stable_failure_code_and_does_not_retry(tmp_path: Pa
     assert "upstream secret detail" not in str(failed)
 
 
+def test_reconcile_retries_transient_failure_and_completes_same_run(tmp_path: Path) -> None:
+    executor = FlakyExecutor("MODEL_UNAVAILABLE")
+    runs = service(
+        tmp_path,
+        executor=executor,
+        worker_count=1,
+        max_run_attempts=2,
+    )
+    runs.start()
+    try:
+        created = runs.create(envelope())
+        runs._queue.join()
+        assert runs.get(created["run_id"])["state"] == "failed"
+
+        assert runs.reconcile_failed() == 1
+        runs._queue.join()
+        completed = runs.get(created["run_id"])
+    finally:
+        runs.close()
+
+    assert completed["state"] == "completed"
+    assert completed["attempts"] == 2
+    assert executor.calls == 2
+
+
+def test_reconcile_does_not_retry_terminal_or_exhausted_failure(tmp_path: Path) -> None:
+    terminal = FailingExecutor("WORKSPACE_INVALID")
+    terminal_runs = service(tmp_path / "terminal", executor=terminal, worker_count=1)
+    terminal_runs.start()
+    try:
+        terminal_runs.create(envelope())
+        terminal_runs._queue.join()
+        assert terminal_runs.reconcile_failed() == 0
+    finally:
+        terminal_runs.close()
+
+    exhausted = FailingExecutor("MODEL_UNAVAILABLE")
+    exhausted_runs = service(
+        tmp_path / "exhausted",
+        executor=exhausted,
+        worker_count=1,
+        max_run_attempts=1,
+    )
+    exhausted_runs.start()
+    try:
+        exhausted_runs.create(envelope())
+        exhausted_runs._queue.join()
+        assert exhausted_runs.reconcile_failed() == 0
+    finally:
+        exhausted_runs.close()
+
+
 def test_recovery_marks_interrupted_run_failed_instead_of_claiming_completion(
     tmp_path: Path,
 ) -> None:
@@ -171,6 +245,21 @@ def test_recovery_marks_interrupted_run_failed_instead_of_claiming_completion(
 
     assert recovered.get(created["run_id"])["state"] == "failed"
     assert recovered.get(created["run_id"])["error_code"] == "JOB_LOST"
+
+
+def test_recovery_completes_run_when_result_was_fully_persisted(tmp_path: Path) -> None:
+    first = service(tmp_path)
+    created = first.create(envelope())
+    first._append_event(created["run_id"], "preparing")
+    first._append_event(created["run_id"], "running")
+    first._append_event(created["run_id"], "finalizing")
+    result_path = tmp_path / "agent-runs" / created["run_id"] / "result.json"
+    result_path.write_text(json.dumps({"report": {"decision": "compliant"}}))
+
+    recovered = service(tmp_path)
+    recovered.start()
+
+    assert recovered.get(created["run_id"])["state"] == "completed"
 
 
 def test_worker_count_allows_sixteen_workers(tmp_path: Path) -> None:
@@ -216,6 +305,43 @@ def test_plagiarism_run_rejects_tampered_bundle_before_persistence(tmp_path: Pat
     assert list((tmp_path / "plagiarism-runs").iterdir()) == []
 
 
+def test_plagiarism_reconcile_retries_generic_execution_failure(tmp_path: Path) -> None:
+    executor = FlakyExecutor("PLAGIARISM_EXECUTION_FAILED")
+    runs = plagiarism_service(
+        tmp_path,
+        executor=executor,
+        worker_count=1,
+        max_run_attempts=2,
+    )
+    runs.start()
+    try:
+        created = runs.create(plagiarism_envelope())
+        runs._queue.join()
+        assert runs.reconcile_failed() == 1
+        runs._queue.join()
+        completed = runs.get(created["run_id"])
+    finally:
+        runs.close()
+
+    assert completed["state"] == "completed"
+    assert completed["attempts"] == 2
+
+
+def test_plagiarism_recovery_completes_fully_persisted_result(tmp_path: Path) -> None:
+    first = plagiarism_service(tmp_path)
+    created = first.create(plagiarism_envelope())
+    first._append_event(created["run_id"], "preparing")
+    first._append_event(created["run_id"], "running")
+    first._append_event(created["run_id"], "finalizing")
+    result_path = tmp_path / "plagiarism-runs" / created["run_id"] / "result.json"
+    result_path.write_text(json.dumps({"candidate_count": 0}))
+
+    recovered = plagiarism_service(tmp_path)
+    recovered.start()
+
+    assert recovered.get(created["run_id"])["state"] == "completed"
+
+
 class CapturingExecutor:
     def __init__(self) -> None:
         self.calls = 0
@@ -230,15 +356,24 @@ class CapturingExecutor:
 
 
 class FailingExecutor:
-    def __init__(self) -> None:
+    def __init__(self, code: str = "MODEL_UNAVAILABLE") -> None:
         self.calls = 0
+        self.code = code
 
     def execute(self, _bundle: VerifiedReviewBundle) -> dict[str, Any]:
         self.calls += 1
         try:
             raise RuntimeError("upstream secret detail")
         except RuntimeError as error:
-            raise AgentRunFailure("MODEL_UNAVAILABLE") from error
+            raise AgentRunFailure(self.code) from error
+
+
+class FlakyExecutor(FailingExecutor):
+    def execute(self, bundle: VerifiedReviewBundle) -> dict[str, Any]:
+        if self.calls == 0:
+            return super().execute(bundle)
+        self.calls += 1
+        return {"report": {"decision": "compliant"}}
 
 
 class CapturingPlagiarismExecutor:

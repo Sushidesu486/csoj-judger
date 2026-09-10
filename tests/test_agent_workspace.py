@@ -77,6 +77,23 @@ def test_preparer_copies_complete_submission_and_frozen_context(tmp_path: Path) 
     assert len(prepared.workspace_digest) == 64
 
 
+def test_preparer_falls_back_to_read_only_archive_root(tmp_path: Path) -> None:
+    hot_root = tmp_path / "hot"
+    archive_root = tmp_path / "archive"
+    item = submission(archive_root)
+    target = tmp_path / "workspace"
+
+    prepared = AgentWorkspacePreparer(hot_root, archive_root=archive_root).prepare(
+        item,
+        basis(),
+        target,
+        policy="必须执行完整计算。",
+    )
+
+    assert (target / "submission/src/main.cpp").read_bytes() == b"student source\n"
+    assert prepared.submission_file_count == 1
+
+
 def test_preparer_binds_verified_request_to_local_basis(tmp_path: Path) -> None:
     oj_root = tmp_path / "oj"
     item = submission(oj_root)

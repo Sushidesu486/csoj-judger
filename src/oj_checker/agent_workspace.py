@@ -14,7 +14,7 @@ from oj_checker.review_basis import ReviewBasis
 from oj_checker.review_scope import ReferenceSnapshot
 from oj_checker.submission_store import (
     UnsafeSubmissionPath,
-    _open_regular_file_beneath,
+    _open_regular_file_from_roots,
     _safe_path_parts,
     _validate_submission_id,
 )
@@ -41,8 +41,16 @@ class PreparedAgentWorkspace:
 
 
 class AgentWorkspacePreparer:
-    def __init__(self, oj_root: str | Path) -> None:
-        self._oj_root = Path(oj_root)
+    def __init__(
+        self,
+        oj_root: str | Path,
+        *,
+        archive_root: str | Path | None = None,
+    ) -> None:
+        roots = [Path(oj_root)]
+        if archive_root is not None and Path(archive_root) != roots[0]:
+            roots.append(Path(archive_root))
+        self._oj_roots = tuple(roots)
 
     def prepare(
         self,
@@ -133,7 +141,7 @@ class AgentWorkspacePreparer:
                 raise UnsafeSubmissionPath(f"invalid declared sha256 for {path!r}")
             destination = target.joinpath(*parts)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            file_fd = _open_regular_file_beneath(self._oj_root, submission.id, parts)
+            file_fd = _open_regular_file_from_roots(self._oj_roots, submission.id, parts)
             digest = hashlib.sha256()
             size = 0
             with os.fdopen(file_fd, "rb") as source, destination.open("xb") as output:

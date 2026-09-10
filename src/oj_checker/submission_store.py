@@ -85,8 +85,16 @@ class SubmissionStore(Protocol):
 
 
 class NfsSubmissionStore:
-    def __init__(self, oj_root: str | Path) -> None:
-        self._oj_root = Path(oj_root)
+    def __init__(
+        self,
+        oj_root: str | Path,
+        *,
+        archive_root: str | Path | None = None,
+    ) -> None:
+        roots = [Path(oj_root)]
+        if archive_root is not None and Path(archive_root) != roots[0]:
+            roots.append(Path(archive_root))
+        self._oj_roots = tuple(roots)
 
     def load_bundle(self, submission: Submission, policy: SourcePolicy) -> SourceBundle:
         if policy.max_file_bytes <= 0 or policy.max_total_bytes <= 0:
@@ -131,7 +139,7 @@ class NfsSubmissionStore:
                 continue
             remaining = max_total_bytes - total_bytes_read
             if remaining <= 0:
-                _validate_file_beneath(self._oj_root, submission.id, parts)
+                _validate_file_from_roots(self._oj_roots, submission.id, parts)
                 source_files.append(
                     SourceFile(
                         path=path,
@@ -144,8 +152,8 @@ class NfsSubmissionStore:
                 )
                 continue
             read_limit = min(max_file_bytes, remaining)
-            data, truncated = _read_file_beneath(
-                self._oj_root, submission.id, parts, read_limit
+            data, truncated = _read_file_from_roots(
+                self._oj_roots, submission.id, parts, read_limit
             )
             omission_reason = None
             if truncated:
@@ -324,11 +332,48 @@ def _read_file_beneath(
     return data[:read_limit], len(data) > read_limit
 
 
+def _read_file_from_roots(
+    oj_roots: tuple[Path, ...],
+    submission_id: str,
+    parts: tuple[str, ...],
+    read_limit: int,
+) -> tuple[bytes, bool]:
+    file_fd = _open_regular_file_from_roots(oj_roots, submission_id, parts)
+    with os.fdopen(file_fd, "rb") as file:
+        data = file.read(read_limit + 1)
+    return data[:read_limit], len(data) > read_limit
+
+
 def _validate_file_beneath(
     oj_root: Path, submission_id: str, parts: tuple[str, ...]
 ) -> None:
     file_fd = _open_regular_file_beneath(oj_root, submission_id, parts)
     os.close(file_fd)
+
+
+def _validate_file_from_roots(
+    oj_roots: tuple[Path, ...],
+    submission_id: str,
+    parts: tuple[str, ...],
+) -> None:
+    file_fd = _open_regular_file_from_roots(oj_roots, submission_id, parts)
+    os.close(file_fd)
+
+
+def _open_regular_file_from_roots(
+    oj_roots: tuple[Path, ...],
+    submission_id: str,
+    parts: tuple[str, ...],
+) -> int:
+    last_error: SubmissionFileError | None = None
+    for oj_root in oj_roots:
+        try:
+            return _open_regular_file_beneath(oj_root, submission_id, parts)
+        except SubmissionFileError as error:
+            last_error = error
+    if last_error is not None:
+        raise last_error
+    raise SubmissionFileError("no submission roots are configured")
 
 
 def _open_regular_file_beneath(

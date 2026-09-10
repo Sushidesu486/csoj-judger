@@ -1,3 +1,52 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: oj-checker-submission-archive
+  labels:
+    app.kubernetes.io/name: oj-checker
+    app.kubernetes.io/component: submission-archive
+spec:
+  accessModes:
+    - ReadOnlyMany
+  capacity:
+    storage: 4Ti
+  csi:
+    driver: rook-ceph.cephfs.csi.ceph.com
+    fsType: ext4
+    nodeStageSecretRef:
+      name: rook-csi-cephfs-node
+      namespace: rook-ceph
+    controllerPublishSecretRef:
+      name: rook-csi-cephfs-provisioner
+      namespace: rook-ceph
+    volumeAttributes:
+      clusterID: rook-ceph
+      fsName: cephfs
+      staticVolume: "true"
+      rootPath: /volumes/csi/csi-vol-5e8db87a-2972-4948-a7a4-4abc41b07765/a0667182-0762-4023-ba15-877d9f4d5630
+    volumeHandle: oj-checker-submission-archive-20260910
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  volumeMode: Filesystem
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: oj-checker-submission-archive
+  namespace: csoj-judger
+  labels:
+    app.kubernetes.io/name: oj-checker
+    app.kubernetes.io/component: submission-archive
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 4Ti
+  storageClassName: ""
+  volumeMode: Filesystem
+  volumeName: oj-checker-submission-archive
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -84,9 +133,17 @@ spec:
             - --listen
             - 0.0.0.0:8080
             - --worker-count
-            - "16"
+            - "4"
             - --max-queued
             - "1000"
+            - --max-run-attempts
+            - "3"
+            - --reconcile-interval
+            - "60"
+            - --reconcile-batch-size
+            - "4"
+            - --max-request-threads
+            - "32"
             - --public-key-file
             - /etc/oj-checker/review-bundle/public-key
           env:
@@ -102,6 +159,8 @@ spec:
                   key: base-url
             - name: OJ_ROOT
               value: /data/.oj
+            - name: OJ_ARCHIVE_ROOT
+              value: /archive/oj
             - name: REPORT_ROOT
               value: /reports
             - name: HPC101_REPOSITORY
@@ -138,7 +197,7 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 256Mi
+              memory: 512Mi
             limits:
               cpu: "1"
               memory: 2Gi
@@ -148,6 +207,9 @@ spec:
               readOnly: true
             - name: submissions
               mountPath: /data
+              readOnly: true
+            - name: submission-archive
+              mountPath: /archive
               readOnly: true
             - name: reports
               mountPath: /reports
@@ -165,11 +227,16 @@ spec:
             server: root.clusters.zjusct.io
             path: /tank/hpc101/submissions
             readOnly: true
+        - name: submission-archive
+          persistentVolumeClaim:
+            claimName: oj-checker-submission-archive
+            readOnly: true
         - name: reports
           persistentVolumeClaim:
             claimName: oj-checker-reports-20260825
         - name: tmp
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 8Gi
         - name: review-bundle-public-key
           secret:
             secretName: oj-checker-review-bundle

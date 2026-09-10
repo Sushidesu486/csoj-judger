@@ -45,7 +45,10 @@ only the corresponding Ed25519 public key and no database credential.
 
 The API Pod mounts the report PVC read/write because an on-demand review writes
 an immutable result. Submission input and the HPC101 review basis remain
-read-only. The image is pinned by digest. The checked-in `claimName`
+read-only. Files missing from the hot NFS are read from the Plat101 CephFS
+archive through a separately bound `ReadOnlyMany` static volume. Its reclaim
+policy is `Retain`; the checker claim must never replace or own the original
+Plat101 archive claim. The image is pinned by digest. The checked-in `claimName`
 (`oj-checker-reports-20260825`) is the temporary RWX report PVC used by the
 two-month deployment on m601.
 
@@ -75,6 +78,8 @@ Submission at 02:00 Asia/Shanghai, skips a compliant or active run, and signs
 each remaining request with the fixed model `glm-5.3`. The trigger has a
 dedicated bearer token but no DB or checker API credential.
 
-Transient LLM failures are attempted at most twice by the report API. The
-CronJob itself has `backoffLimit: 0`, continues with the next Submission, and
-leaves failed items for the following night.
+Transient LLM failures are attempted at most twice inside one Agent turn. Run
+reconciliation retries `MODEL_UNAVAILABLE`, `JOB_LOST`, and generic execution
+failures with at most three total run attempts and a small per-minute batch.
+Invalid workspaces, invalid signed bundles, result protocol errors, and turn
+limit failures remain terminal. The CronJob itself has `backoffLimit: 0`.
