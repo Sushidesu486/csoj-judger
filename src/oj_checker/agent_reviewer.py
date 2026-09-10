@@ -395,7 +395,7 @@ def _read_streaming_response(response: BinaryLineReader) -> Mapping[str, Any]:
     if not saw_done and consume_event():
         saw_done = True
     if not saw_done:
-        raise AgentReviewError("model stream ended before [DONE]")
+        raise TransientAgentReviewError("model stream ended before [DONE]")
     if not saw_choice:
         raise AgentReviewError("model stream did not contain a choice")
     if finish_reason is None:

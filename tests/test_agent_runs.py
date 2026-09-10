@@ -21,6 +21,30 @@ def envelope() -> bytes:
     return Path("tests/fixtures/review_bundle_v1.json").read_bytes()
 
 
+def review_envelope(*, source: str, model: str) -> bytes:
+    wire = json.loads(envelope())
+    encoded = wire["payload"]
+    raw = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+    payload = json.loads(raw)
+    payload["source"] = source
+    payload["model"] = model
+    payload["nonce"] = "00000000-0000-4000-8000-000000000098"
+    serialized = json.dumps(payload, separators=(",", ":")).encode()
+    private_key = Ed25519PrivateKey.from_private_bytes(
+        bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+    )
+    return json.dumps(
+        {
+            "payload": base64.urlsafe_b64encode(serialized).rstrip(b"=").decode(),
+            "key_id": KEY_ID,
+            "signature": base64.urlsafe_b64encode(private_key.sign(serialized))
+            .rstrip(b"=")
+            .decode(),
+        },
+        separators=(",", ":"),
+    ).encode()
+
+
 def plagiarism_envelope() -> bytes:
     payload = {
         "schema_version": "plagiarism-review-bundle-v1",
@@ -204,6 +228,49 @@ def test_reconcile_retries_transient_failure_and_completes_same_run(tmp_path: Pa
     assert completed["state"] == "completed"
     assert completed["attempts"] == 2
     assert executor.calls == 2
+
+
+@pytest.mark.parametrize("error_code", ["AGENT_EXECUTION_FAILED", "RESULT_INVALID"])
+def test_reconcile_retries_legacy_manual_failure(
+    tmp_path: Path,
+    error_code: str,
+) -> None:
+    executor = FlakyExecutor(error_code)
+    runs = service(tmp_path, executor=executor, worker_count=1, max_run_attempts=2)
+    runs.start()
+    try:
+        created = runs.create(envelope())
+        runs._queue.join()
+
+        assert runs.reconcile_failed() == 1
+        runs._queue.join()
+        completed = runs.get(created["run_id"])
+    finally:
+        runs.close()
+
+    assert completed["state"] == "completed"
+    assert completed["attempts"] == 2
+
+
+@pytest.mark.parametrize("error_code", ["AGENT_EXECUTION_FAILED", "RESULT_INVALID"])
+def test_reconcile_does_not_retry_legacy_nightly_failure(
+    tmp_path: Path,
+    error_code: str,
+) -> None:
+    executor = FailingExecutor(error_code)
+    runs = service(tmp_path, executor=executor, worker_count=1)
+    runs.start()
+    try:
+        created = runs.create(review_envelope(source="nightly", model="glm-5.3"))
+        runs._queue.join()
+
+        assert runs.reconcile_failed() == 0
+        failed = runs.get(created["run_id"])
+    finally:
+        runs.close()
+
+    assert failed["state"] == "failed"
+    assert failed["attempts"] == 1
 
 
 def test_reconcile_does_not_retry_terminal_or_exhausted_failure(tmp_path: Path) -> None:

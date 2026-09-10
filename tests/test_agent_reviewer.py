@@ -466,6 +466,48 @@ def test_openai_client_rejects_malformed_sse_without_echoing_response(
     assert "secret-not-json" not in str(raised.value)
 
 
+def test_openai_client_classifies_truncated_sse_as_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: streaming_response(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": "partial"},
+                        "finish_reason": None,
+                    }
+                ]
+            }
+        ),
+    )
+
+    with pytest.raises(TransientAgentReviewError, match="ended before \\[DONE\\]"):
+        OpenAICompatibleToolChatClient("https://newapi.example/v1", "token").complete(
+            model="gpt-5.6-luna",
+            messages=[],
+            tools=[],
+            parameters={},
+        )
+
+
+def test_agent_retries_transient_model_call_within_the_same_turn(tmp_path: Path) -> None:
+    client = TransientThenFinishClient()
+
+    result = WorkspaceAgentReviewer(client, max_attempts=2).review(
+        model="gpt-5.6-luna",
+        broker=broker(tmp_path),
+        policy="必须执行 required。",
+        submission={"id": "synthetic", "lab_id": "lab2"},
+    )
+
+    assert result.report["decision"] == "violation"
+    assert client.calls == 2
+
+
 def test_openai_client_rejects_stream_larger_than_two_mib(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -517,3 +559,14 @@ def test_openai_client_classifies_http_failures_without_echoing_response(
             parameters={},
         )
     assert "secret upstream response" not in str(raised.value)
+
+
+class TransientThenFinishClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, **_kwargs: Any) -> Mapping[str, Any]:
+        self.calls += 1
+        if self.calls == 1:
+            raise TransientAgentReviewError("model stream ended before [DONE]")
+        return tool_response(("finish-1", "finish_review", report()))

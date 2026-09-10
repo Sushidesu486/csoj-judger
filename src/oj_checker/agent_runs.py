@@ -17,7 +17,10 @@ from oj_checker.review_bundle import VerifiedReviewBundle, verify_review_bundle
 _RUN_ID = re.compile(r"^review-[0-9a-f]{64}$")
 _TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
 _ACTIVE_STATES = frozenset({"preparing", "running", "finalizing"})
-_RETRYABLE_FAILURES = frozenset({"AGENT_EXECUTION_FAILED", "JOB_LOST", "MODEL_UNAVAILABLE"})
+_RETRYABLE_FAILURES = frozenset({"JOB_LOST", "MODEL_UNAVAILABLE"})
+_LEGACY_MANUAL_RETRYABLE_FAILURES = frozenset(
+    {"AGENT_EXECUTION_FAILED", "RESULT_INVALID"}
+)
 _QUEUE_STOP = object()
 _LOGGER = logging.getLogger(__name__)
 
@@ -271,9 +274,10 @@ class FileAgentRunService:
                     dict(run)
                     for run in self._runs.values()
                     if run.get("state") == "failed"
-                    and run.get("error_code") in _RETRYABLE_FAILURES
+                    and self._is_retryable_failure(run)
                 ),
                 key=lambda run: (str(run.get("updated_at", "")), str(run.get("run_id", ""))),
+                reverse=True,
             )
             reconciled = 0
             for run in candidates:
@@ -290,6 +294,14 @@ class FileAgentRunService:
                 self._queue.put_nowait(run_id)
                 reconciled += 1
             return reconciled
+
+    @staticmethod
+    def _is_retryable_failure(run: Mapping[str, Any]) -> bool:
+        error_code = run.get("error_code")
+        return error_code in _RETRYABLE_FAILURES or (
+            run.get("source") == "manual"
+            and error_code in _LEGACY_MANUAL_RETRYABLE_FAILURES
+        )
 
     def _reconcile_loop(self) -> None:
         while not self._reconcile_stop.wait(self._reconcile_interval_seconds):
