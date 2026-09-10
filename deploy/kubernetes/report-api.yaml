@@ -16,9 +16,6 @@ spec:
     nodeStageSecretRef:
       name: rook-csi-cephfs-node
       namespace: rook-ceph
-    controllerPublishSecretRef:
-      name: rook-csi-cephfs-provisioner
-      namespace: rook-ceph
     volumeAttributes:
       clusterID: rook-ceph
       fsName: cephfs
