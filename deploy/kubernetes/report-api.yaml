@@ -130,7 +130,7 @@ spec:
             - --listen
             - 0.0.0.0:8080
             - --worker-count
-            - "4"
+            - "16"
             - --max-queued
             - "1000"
             - --max-run-attempts
@@ -145,6 +145,8 @@ spec:
             - "32"
             - --public-key-file
             - /etc/oj-checker/review-bundle/public-key
+            - --plagiarism-worker-count
+            - "4"
           env:
             - name: LLM_API_KEY
               valueFrom:
@@ -195,11 +197,11 @@ spec:
               drop: ["ALL"]
           resources:
             requests:
-              cpu: 100m
-              memory: 512Mi
+              cpu: "2"
+              memory: 4Gi
             limits:
-              cpu: "1"
-              memory: 2Gi
+              cpu: "16"
+              memory: 16Gi
           volumeMounts:
             - name: baseline
               mountPath: /baseline
