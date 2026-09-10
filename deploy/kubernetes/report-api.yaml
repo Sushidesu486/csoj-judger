@@ -136,6 +136,8 @@ spec:
             - --max-run-attempts
             - "3"
             - --reconcile-interval
+            - "0"
+            - --plagiarism-reconcile-interval
             - "60"
             - --reconcile-batch-size
             - "4"

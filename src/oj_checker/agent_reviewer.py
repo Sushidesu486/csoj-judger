@@ -38,6 +38,10 @@ class TransientAgentReviewError(AgentReviewError):
     """A model call failed transiently and may be retried within the current turn."""
 
 
+class AgentModelConfigurationError(AgentReviewError):
+    """The configured model endpoint rejected its credentials or access policy."""
+
+
 class AgentReviewLimitError(AgentReviewError):
     """The model exceeded one of the bounded Agent execution limits."""
 
@@ -290,6 +294,10 @@ class OpenAICompatibleToolChatClient:
                 return _read_streaming_response(response)
         except urllib.error.HTTPError as error:
             error.read(_MAX_HTTP_RESPONSE_BYTES + 1)
+            if error.code in {401, 403}:
+                raise AgentModelConfigurationError(
+                    f"model endpoint returned status {error.code}"
+                ) from None
             if error.code in {408, 409, 425, 429} or error.code >= 500:
                 raise TransientAgentReviewError(
                     f"model endpoint returned transient status {error.code}"

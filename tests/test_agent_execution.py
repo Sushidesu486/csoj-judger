@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from oj_checker.agent_execution import LocalAgentRunExecutor
+from oj_checker.agent_reviewer import AgentModelConfigurationError
 from oj_checker.agent_runs import AgentRunFailure
 from oj_checker.plagiarism_execution import LocalPlagiarismRunExecutor
 from oj_checker.review_basis import GitReviewBasisProvider
@@ -102,6 +103,31 @@ def test_local_executor_classifies_missing_submission_file(tmp_path: Path) -> No
         executor.execute(bundle(review_basis, b"missing source\n"))
 
     assert failure.value.code == "WORKSPACE_INVALID"
+
+
+def test_local_executor_classifies_model_configuration_failure(tmp_path: Path) -> None:
+    repository, revision = baseline_repository(tmp_path)
+    review_basis = GitReviewBasisProvider(repository, revision).load("lab2")
+    oj_root = tmp_path / "oj"
+    source = b"int main() { return compute(); }\n"
+    source_root = oj_root / "submissions" / SUBMISSION_ID / "input"
+    source_root.mkdir(parents=True)
+    (source_root / "main.cpp").write_bytes(source)
+    work_root = tmp_path / "work"
+    work_root.mkdir()
+    executor = LocalAgentRunExecutor(
+        oj_root=oj_root,
+        hpc101_repository=repository,
+        lab4_reference_repository=tmp_path / "unused-reference",
+        lab4_reference_label="xiaoqu0000/NR-amssncku",
+        work_root=work_root,
+        client=ConfigurationFailureClient(),
+    )
+
+    with pytest.raises(AgentRunFailure) as failure:
+        executor.execute(bundle(review_basis, source))
+
+    assert failure.value.code == "MODEL_CONFIGURATION_ERROR"
 
 
 def test_plagiarism_executor_compares_only_target_and_persists_oriented_report(
@@ -369,3 +395,8 @@ class FinishClient:
                 }
             ]
         }
+
+
+class ConfigurationFailureClient:
+    def complete(self, **_kwargs: Any) -> Mapping[str, Any]:
+        raise AgentModelConfigurationError("model endpoint returned status 401")

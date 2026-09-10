@@ -19,7 +19,9 @@ from oj_checker.review_bundle import VerifiedReviewBundle
 _RUN_ID = re.compile(r"^plagiarism-[0-9a-f]{64}$")
 _TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
 _ACTIVE_STATES = frozenset({"preparing", "running", "finalizing"})
-_RETRYABLE_FAILURES = frozenset({"JOB_LOST", "PLAGIARISM_EXECUTION_FAILED"})
+_RETRYABLE_FAILURES = frozenset(
+    {"JOB_LOST", "PLAGIARISM_EXECUTION_FAILED", "SOURCE_BUNDLE_INVALID"}
+)
 _QUEUE_STOP = object()
 _LOGGER = logging.getLogger(__name__)
 

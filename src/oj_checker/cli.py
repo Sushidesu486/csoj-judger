@@ -533,6 +533,11 @@ def _agent_report_api(args: argparse.Namespace) -> None:
     public_key = _read_review_bundle_public_key(Path(args.public_key_file))
     work_root = Path(args.work_root)
     work_root.mkdir(parents=True, exist_ok=True)
+    plagiarism_reconcile_interval = (
+        args.plagiarism_reconcile_interval
+        if args.plagiarism_reconcile_interval is not None
+        else args.reconcile_interval
+    )
     executor = LocalAgentRunExecutor(
         oj_root=Path(args.oj_root),
         oj_archive_root=Path(args.oj_archive_root) if args.oj_archive_root else None,
@@ -587,7 +592,7 @@ def _agent_report_api(args: argparse.Namespace) -> None:
         worker_count=args.plagiarism_worker_count,
         max_queued=args.plagiarism_max_queued,
         max_run_attempts=args.max_run_attempts,
-        reconcile_interval_seconds=args.reconcile_interval,
+        reconcile_interval_seconds=plagiarism_reconcile_interval,
         reconcile_batch_size=args.reconcile_batch_size,
     )
     api = ComplianceApi(
@@ -831,6 +836,7 @@ def _parser() -> argparse.ArgumentParser:
     agent_api.add_argument("--max-attempts", type=int, default=2)
     agent_api.add_argument("--max-run-attempts", type=int, default=3)
     agent_api.add_argument("--reconcile-interval", type=float, default=60)
+    agent_api.add_argument("--plagiarism-reconcile-interval", type=float)
     agent_api.add_argument("--reconcile-batch-size", type=int, default=4)
     agent_api.add_argument("--max-request-threads", type=int, default=32)
     agent_api.add_argument("--llm-timeout", type=float, default=180)

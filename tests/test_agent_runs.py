@@ -305,8 +305,8 @@ def test_plagiarism_run_rejects_tampered_bundle_before_persistence(tmp_path: Pat
     assert list((tmp_path / "plagiarism-runs").iterdir()) == []
 
 
-def test_plagiarism_reconcile_retries_generic_execution_failure(tmp_path: Path) -> None:
-    executor = FlakyExecutor("PLAGIARISM_EXECUTION_FAILED")
+def test_plagiarism_reconcile_retries_source_bundle_failure(tmp_path: Path) -> None:
+    executor = FlakyExecutor("SOURCE_BUNDLE_INVALID")
     runs = plagiarism_service(
         tmp_path,
         executor=executor,

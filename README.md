@@ -30,6 +30,8 @@ OJ Arbiter 是 HPC101 OJ 的只读合规审查器。它从 plat101 PostgreSQL �
 - 正式 API 已切换到无 DB 凭据的 Agent 路径：完整 workspace、只读 typed tools、
   native tool-call loop 和证据引用校验；当前 worker 仍是单 Pod 内的临时 executor，
   后续可替换为隔离 Kubernetes Job 而不改变签名 API。
+- 合规审查与查重 run 使用独立 reconcile 周期；当前部署因 `glm-5.3` 上游凭据失效而暂停
+  合规失败重试，只恢复挂载冷归档后的查重任务。
 - 旧审查命令仍保留只读 DB adapter 以便回溯；新的 Agent API、workspace preparer 和 worker 均不持有 DB 凭据。
 
 ## 正式审查入口

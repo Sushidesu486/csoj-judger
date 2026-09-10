@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from oj_checker.agent_reviewer import (
+    AgentModelConfigurationError,
     AgentReviewError,
     AgentReviewLimitError,
     OpenAICompatibleToolChatClient,
@@ -486,6 +487,8 @@ def test_openai_client_rejects_stream_larger_than_two_mib(
 @pytest.mark.parametrize(
     ("status", "error_type"),
     [
+        (401, AgentModelConfigurationError),
+        (403, AgentModelConfigurationError),
         (400, AgentReviewError),
         (429, TransientAgentReviewError),
         (503, TransientAgentReviewError),

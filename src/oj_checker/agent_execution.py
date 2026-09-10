@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from oj_checker.agent_reviewer import (
+    AgentModelConfigurationError,
     AgentReviewError,
     AgentReviewLimitError,
     ToolChatClient,
@@ -140,6 +141,8 @@ class LocalAgentRunExecutor:
                 )
         except (SubmissionFileError, UnsafeSubmissionPath) as error:
             raise AgentRunFailure("WORKSPACE_INVALID") from error
+        except AgentModelConfigurationError as error:
+            raise AgentRunFailure("MODEL_CONFIGURATION_ERROR") from error
         except TransientAgentReviewError as error:
             raise AgentRunFailure("MODEL_UNAVAILABLE") from error
         except AgentReviewLimitError as error:
