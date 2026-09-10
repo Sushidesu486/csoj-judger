@@ -87,7 +87,7 @@ spec:
                       - m601.clusters.zjusct.io
       initContainers:
         - name: fetch-review-basis
-          image: harbor.clusters.zjusct.io/library/oj-checker@sha256:646a37722ddf43aa589ab6d546a57ff218f8cbbdde062f906cc896b43425d6fc
+          image: harbor.clusters.zjusct.io/library/oj-checker@sha256:e993a5b77bee511675651a159a75cbf8b55a4f5762eabdce94fa1e9f662d3cdc
           command: ["/bin/sh", "-ceu"]
           args:
             - |
@@ -124,7 +124,7 @@ spec:
               mountPath: /tmp
       containers:
         - name: report-api
-          image: harbor.clusters.zjusct.io/library/oj-checker@sha256:646a37722ddf43aa589ab6d546a57ff218f8cbbdde062f906cc896b43425d6fc
+          image: harbor.clusters.zjusct.io/library/oj-checker@sha256:e993a5b77bee511675651a159a75cbf8b55a4f5762eabdce94fa1e9f662d3cdc
           args:
             - agent-report-api
             - --listen
